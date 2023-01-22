@@ -1,5 +1,6 @@
 # DSPL
 This is the implementation of A Dual-Stage Pseudo-Labeling Method for the Diagnosis of Mental Disorder on MRI Scans
+
 @inproceedings{hu2022dual,
 
   title={A dual-stage pseudo-labeling method for the diagnosis of mental disorder on MRI scans},

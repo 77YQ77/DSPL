@@ -1,4 +1,3 @@
-#### This is the implementation of NatIMG_FL ####
 from lcoal_training_gems_gpu_att_test import lcoal_training
 from lcoal_training_gems_gpu_att_test import data_name, num_clients
 import torch
@@ -18,7 +17,6 @@ from PIL import Image
 from tqdm import tqdm, trange
 from contrastive_loss import SupConLoss
 from resnetv2_temp import resnet18_,resnet50_
-from test_model_gpu import contrastive_test_method,contrastive_global_test_method
 from torch.utils.data import Dataset,DataLoader
 import torchvision.transforms as transforms
 from fedlab.utils.functional import save_dict

@@ -1,812 +1,1201 @@
-from lcoal_training_gems_gpu_att_test import lcoal_training
-from lcoal_training_gems_gpu_att_test import data_name, num_clients
-import torch
-from torch import multiprocessing as mp
-torch.multiprocessing.set_start_method('spawn')
-import torchvision
 import warnings
+import argparse
+warnings.filterwarnings('ignore')
+from collections import OrderedDict
 import numpy as np
-import random
-import os,copy
-import models
-# os.environ["CUDA_VISIBLE_DEVICES"] = '0'
-import torchvision.datasets as dsets
-from sklearn import decomposition
-from torchvision.datasets import MNIST
-from PIL import Image
+import copy
+import heapq
 from tqdm import tqdm, trange
-from contrastive_loss import SupConLoss
+from sklearn.cluster import KMeans
+from scipy.spatial.distance import cdist
 from resnetv2_temp import resnet18_,resnet50_
-from test_model_gpu import contrastive_test_method,contrastive_global_test_method
-from torch.utils.data import Dataset,DataLoader
-import torchvision.transforms as transforms
-from fedlab.utils.functional import save_dict
-from Federated_avg import federated_average
-from fedlab.utils.dataset.slicing import noniid_slicing, random_slicing
-from utils import loop_iterable, set_requires_grad, GrayscaleToRgb
-from multiprocess import Pool
+from test_model_att import contrastive_global_test_method,train_test
 
-print('data_name',data_name)
-# import os
-# #os.environ["CUDA_VISIBLE_DEVICES"] = '3'
-# import torchvision
-# import argparse
-# import warnings
-# import torch
-# import numpy as np
-# import random
-# import copy
-# from distill import *
-# from utils import *
-# import torchvision.datasets as dsets
-# from sklearn import decomposition
-# from torchvision.datasets import MNIST
-# from PIL import Image
-# import json
-# from tqdm import tqdm, trange
-# import models
-# from contrastive_loss import SupConLoss
 # from test_model_att import contrastive_test_method,contrastive_global_test_method,train_test
-# from torch.utils.data import Dataset,DataLoader
-# import torchvision.transforms as transforms
-# from fedlab.utils.functional import save_dict
-# from pseudo_labeling_att import obtain_cnn_centroid_feature
-# from Federated_avg import federated_average
-# from fedlab.utils.dataset.slicing import noniid_slicing, random_slicing
-# from utils import loop_iterable, set_requires_grad, GrayscaleToRgb
-# from multiprocess import Pool
-# import torch.nn as nn
-# import torch.nn.functional as F
-### parameters ###
-# labeled_per = 0.03
-labeled_num = 20
-# image_size = 28
-batch_size = 128
-iterations = 200
-epochs = 2  #50(default) 2
-cm_rounds=50
-source_num=3000
-contrastive_weights = 2
-clustering_weights = 2
-avg_type = 'fedavg'
+from utils import *
+from distill import *
+data_name="cifar-10"
+frozen =True
+num_clients=5
+def lcoal_training(model,optim,lr_schedule,idx,source_loader,labeled_loader,unlabeled_loader, test_loader, epochs,iterations,comm):
+    # print('idx',idx)
+    data_name="cifar-10"
+    gpus_num = 5
+    gpu_id = 1+(idx % gpus_num)
+    # if gpu_id==:
+    #     gpu_id=1
+    # if comm==0:
+    import os
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    # gpus_num = 7
+    # gpu_id = idx % gpus_num
+    # if gpu_id==0 and idx>0:
+    #     gpu_id=1
+    # if comm==0:
+    # import os
+    # os.environ["CUDA_VISIBLE_DEVICES"] = str(7)
+    from utils import loop_iterable
+    from contrastive_loss import SupConLoss
+    import torch
+    torch.autograd.set_detect_anomaly(True)
+    import models
+    import torch.nn as nn
+    import torch.nn.functional as F
+# from pseudo_labeling_gpu import obtain_cnn_centroid_feature,obtain_cnn_source_centroid_feature,obtain_cnn_confidence_index
+    criterion_1 = torch.nn.CrossEntropyLoss()
+    criterion_2 = SupConLoss()
 
-criterion_1 = torch.nn.CrossEntropyLoss()
-criterion_2 = SupConLoss()
-# device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-### target data type ###
-data_type = 'phenomia'
-if data_type=='covid':
-    data_dir_HC = '/home/zhianhuang/huyao/Public2Medical/output_no_finding/'
-    data_dir_covid = '/home/zhianhuang/huyao/Public2Medical/output/'
-if data_type=='phenomia': 
-    data_dir_HC = '/home/zhianhuang/huyao/Public2Medical/Pneumonia_chest_xray/train/NORMAL/'
-    data_dir_covid = '/home/zhianhuang/huyao/Public2Medical/Pneumonia_chest_xray/train/PNEUMONIA/'
-    data_dir_HC_test = '/home/zhianhuang/huyao/Public2Medical/Pneumonia_chest_xray/test/NORMAL/'
-    data_dir_covid_test = '/home/zhianhuang/huyao/Public2Medical/Pneumonia_chest_xray/test/PNEUMONIA/'
-
-class TensorDataset(Dataset):
-    def __init__(self, data_tensor, target_tensor):
-        self.data_tensor = data_tensor
-        self.target_tensor = target_tensor
-
-    def __getitem__(self, index):
-        return self.data_tensor[index], self.target_tensor[index]
-
-    def __len__(self):
-        return len(self.data_tensor)
-
-class TensorDataset_aug(Dataset):
-    def __init__(self, data_tensor, aug_data_tensor, target_tensor):
-        self.data_tensor = data_tensor
-        self.aug_data_tensor = aug_data_tensor
-        self.target_tensor = target_tensor
-
-    def __getitem__(self, index):
-        return self.data_tensor[index], self.aug_data_tensor[index], self.target_tensor[index]
-
-    def __len__(self):
-        return len(self.data_tensor)
-
-def load_xray(path):
-    if path == data_dir_HC:
-        HC=True
-    else:
-        HC=False
-    x_dirs=os.listdir(path)
-    dataset=[]
-    label = []
-    # PT_label=[]
-    for file in range(len(x_dirs)):
-        fpath=os.path.join(path,x_dirs[file])
-        #print(f)
-        _x=Image.open(fpath).convert('RGB')
-        # print('_x',_x.shape)
-        # img= test_transformer(_x)
-        # print(img.shape)
-        # dataset.append(img)
-        if HC ==True:
-            dataset.append(_x)
-            label.append(1)
-        else:
-            dataset.append(_x)
-            label.append(0)
-    return dataset, label
-
-def load_xray_test(path,image_size):
-    test_transformer = transforms.Compose([
-            transforms.Resize((image_size, image_size), interpolation=3),
-            transforms.ToTensor()
-            ])
-    if path == data_dir_HC_test:
-        HC=True
-    if path == data_dir_covid_test:
-        HC=False
-    x_dirs=os.listdir(path)
-    dataset=[]
-    label = []
-    # PT_label=[]
-    for file in range(len(x_dirs)):
-        fpath=os.path.join(path,x_dirs[file])
-        #print(f)
-        _x=Image.open(fpath).convert('RGB')
-        img= test_transformer(_x)
-        # print(img.shape)
-        # dataset.append(img)
-        if HC ==True:
-            dataset.append(img)
-            label.append(1)
-        else:
-            dataset.append(img)
-            label.append(0)
-    return dataset, label
-
-
-
-def noniid_slicing(data, labels, num_clients, num_shards):
-    """Slice a dataset for non-IID.
+    try:
+        torch.multiprocessing.set_start_method('fork',force=True)
+    except RuntimeError: 
+        pass
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.cpu()
+    model = model.to(device)
+    if comm>0 and idx ==6:
+        AUC_best=0
+        model_test = copy.deepcopy(model)
+        model_test.load_state_dict(torch.load('global_model/'+str(data_name)+'_att_global_test_'+str(comm-1)+'.pt'))
+        test_ACC, test_SPE, test_REC, test_AUC_ = contrastive_global_test_method(model_test, test_loader,device)
+        if test_AUC_ >=AUC_best:
+            AUC_best=test_AUC_
+            torch.save(model_test.state_dict(),'global_model/'+str(data_name)+'_avg_global_best'+'.pt')  
+        tqdm.write(f'commu_round {comm-1:01d}: test_ACC_avg={test_ACC:.4f}, ' 
+                                f'test_SPE_avg= {test_SPE:.4f}, '
+                                f'test_REC_avg= {test_REC:.4f}, '
+                                f'test_AUC_avg= {test_AUC_:.4f}')
+        del model_test
+        torch.cuda.empty_cache()
     
-    Args:
-        dataset (torch.utils.data.Dataset): Dataset to slice.
-        num_clients (int):  Number of client.
-        num_shards (int): Number of shards.
-    
-    Notes:
-        The size of a shard equals to ``int(len(dataset)/num_shards)``.
-        Each client will get ``int(num_shards/num_clients)`` shards.
-
-    Returns：
-        dict: ``{ 0: indices of dataset, 1: indices of dataset, ..., k: indices of dataset }``
-    """
-    total_sample_nums = len(data)
-    size_of_shards = int(total_sample_nums / num_shards)
-    if total_sample_nums % num_shards != 0:
-        warnings.warn(
-            "warning: the length of dataset isn't divided exactly by num_shard.some samples will be dropped."
-        )
-    # the number of shards that each one of clients can get
-    shard_pc = int(num_shards / num_clients)
-    if num_shards % num_clients != 0:
-        warnings.warn(
-            "warning: num_shard isn't divided exactly by num_clients. some samples will be dropped."
-        )
-
-    dict_users = {i: np.array([], dtype='int64') for i in range(num_clients)}
-
-    idxs = np.arange(total_sample_nums)
-
-    # sort sample indices according to labels
-    idxs_labels = np.vstack((idxs, labels))
-    idxs_labels = idxs_labels[:, idxs_labels[1, :].argsort()]
-    idxs = idxs_labels[0, :]  # corresponding labels after sorting are [0, .., 0, 1, ..., 1, ...]
-
-    # assign
-    idx_shard = [i for i in range(num_shards)]
-    for i in range(num_clients):
-        rand_set = set(np.random.choice(idx_shard, shard_pc, replace=False))
-        idx_shard = list(set(idx_shard) - rand_set)
-        for rand in rand_set:
-            dict_users[i] = np.concatenate(
-                (dict_users[i],
-                 idxs[rand * size_of_shards:(rand + 1) * size_of_shards]),
-                axis=0)
-
-    return dict_users
-def seconde_min(lt):
-    d={}         #设定一个空字典
-    for i, v in enumerate(lt):#利用函数enumerate列出lt的每个元素下标i和元素v
-        d[v]=i   #把v作为字典的键，v对应的值是i
-    lt.sort()    #运用sort函数对lt元素排
-    y=lt[1]      #此时lt中第二小的下标是1，求出对应的元素就是字典对应的键
-    return d[y]  #根据键找到对应值就是所找的下标
-    
-def cal_mean_column(HC_labeled_data):
-    HC_labeled_data_ = copy.deepcopy(HC_labeled_data)
-    for i in range(HC_labeled_data_.shape[1]):
-        avg=torch.mean(HC_labeled_data_[:,i])
-        if avg!=0:
-            HC_labeled_data_[:,i] = HC_labeled_data_[:,i]/avg
-        else:
-            HC_labeled_data_[:,i] = HC_labeled_data_[:,i]
-    return HC_labeled_data_
-def cal_mean_row(HC_labeled_data):
-    HC_labeled_data_ = copy.deepcopy(HC_labeled_data)
-    for i in range(HC_labeled_data_.shape[0]):
-        avg=torch.mean(HC_labeled_data_[i,:])
-        if avg!=0:
-            HC_labeled_data_[i,:] = HC_labeled_data_[i,:]/avg
-        else:
-            HC_labeled_data_[i,:] = HC_labeled_data_[i,:]
-    return HC_labeled_data_
-def obtain_similarity(labeled_data_,mnist_list):
-    similarity=[]
-    for i in range(len(mnist_list)):
-        data_com = torch.cat([labeled_data_,mnist_list[i]],dim=0)
-        estimator=decomposition.NMF(n_components=10, init='nndsvda', tol=5e-4)
-        estimator.fit(data_com)
-        WT = estimator.fit_transform(data_com.T)
-        HT = estimator.components_
-        HT_1 = HT[:,:len(labeled_data_)]
-        HT_2 = HT[:,len(labeled_data_):]
-        p_list=[]
-        for j in range(50):
-            p_=[]
-            for i in range(len(HT_1)):
-        #         print(max(max(HT_1[i]),max(HT_2[i])))
-                T=np.random.uniform(max(max(HT_1[i]), max(HT_2[i])))
-        #         print(T)
-                n1=len(np.where(HT_1[i]>T)[0])
-        #         print(n1)
-                n2=len(np.where(HT_2[i]>T)[0])
-                p=n1/HT_1.shape[1]-n2/HT_2.shape[1]
-                p_.append(p)
-            p_list.append(p_)
-        #         print(n2)
-        p_array=np.array(p_list)
-        p_avg = np.mean(p_array,axis=0)
-        x_norm=np.linalg.norm(p_avg, ord=1, axis=None, keepdims=False)
-#         print(x_norm)
-        similarity.append(x_norm)
-    similarity_arr=np.array(similarity)
-    print('similarity_arr',similarity_arr)
-    index = np.argmin(similarity_arr)
-    return similarity_arr, index
-# for index, (data, label) in enumerate(train_dataset_loader):
-#     print(data.shape)
-#     print(label)
-def obtain_mnist_ini(dataname,image_size, class_one):
-    if dataname=="mnist":
-        mnist_dataset = MNIST(root='./MNIST_data',
-                         train=True,
-                         transform=transforms.Compose([GrayscaleToRgb(), transforms.ToTensor()]),
-                         download=True)
-    if dataname=="cifar-10":
+    if comm>0 and idx==7:
+        # print('true')
+        gems_test_best=0
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--model_t', default='wrn16x2', type=str)
+        parser.add_argument('--model', default='wrn28x2', type=str)
+        parser.add_argument('--qk_dim', default=128, type=int)
+        args = parser.parse_args()
+        # print('args',args)
+        if data_name == 'mnist':
+            model_global = models.__dict__['wrn28x2'](num_classes=50)
+            image_size=28
+        if data_name == 'cifar-10':
+            model_global = resnet18_(pretrained=False)
+            image_size=224
+        if data_name == 'imagenet':
+            model_global = resnet50_(pretrained=True)
+            image_size=224
+        # print('model_true')
+        args.guide_layers = LAYER[args.model_t]
+        args.hint_layers = LAYER[args.model]
+        data_ev = torch.randn(2, 3, image_size, image_size).to(device)
+        # print('data_ev_done')
+        model_global.to(device)
+        model.eval()
+        model_global.eval()
+        with torch.no_grad():
+            feat_t, _,_,_ = model(data_ev, is_feat=True)
+            feat_s, _,_,_ = model_global(data_ev, is_feat=True)
+        # model_global.train()
+        model.train()
+        model_global.train()
+        args.s_shapes = [feat_s[i].size() for i in args.hint_layers]
+        args.t_shapes = [feat_t[i].size() for i in args.guide_layers]
+        # for i in args.hint_layers:
+        #     print('feat_s[i].size()',feat_s[i].size())
+        # for i in args.guide_layers:
+        #     print('feat_t[i].size()',feat_t[i].size())
         
-        transform = transforms.Compose([transforms.Scale(image_size),
-                                transforms.ToTensor(),
-                                # transforms.Grayscale(num_output_channels=1),
-                                transforms.Normalize(mean=([0.5,0.5,0.5]), std=([0.5,0.5,0.5]))])
-        mnist_dataset = dsets.CIFAR10(root='./CIFAR_data',
-                         train=True,
-                         transform=transform,
-                         download=True)
-    if dataname == 'imagenet':
-        data_transform = transforms.Compose([
-        transforms.Resize((image_size,image_size), interpolation=3),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                    	     std=[0.229, 0.224, 0.225])
-    ])
+        args.n_t, args.unique_t_shapes = unique_shape(args.t_shapes)
+        criterion_kd = AFD(args)
+        # print('criterion_kd_done')
+        criterion_kl = DistillKL_(4)
+        # print('criterion_kl_done')
+        criterion_kd.to(device)
+        # print('criterion_kd_device_done')
+        model_temp=copy.deepcopy(model)
+        model_temp.load_state_dict(torch.load('global_model/'+str(data_name)+'_att_global_test_'+str(comm-1)+'.pt'))
+        if frozen==True:
+            kk=[list(model_temp.state_dict().keys())[-2],list(model_temp.state_dict().keys())[-1]]
+            vv=[model.state_dict()[list(model_temp.state_dict().keys())[-2]],model_temp.state_dict()[list(model_temp.state_dict().keys())[-1]]]
+            dictionary = dict(zip(kk, vv))
+            model_global.load_state_dict(dictionary,strict=False)
+            list(model_global.parameters())[-1].requires_grad = False
+            list(model_global.parameters())[-2].requires_grad = False
+        # print('global_model_frozen')
+        global_epoch=30
+        trainable_list = nn.ModuleList([])
+        trainable_list.append(model_global)
+        trainable_list.append(criterion_kd)
+        # model_global=copy.deepcopy(model)
+        optim_global = torch.optim.Adam(trainable_list.parameters())
+        lr_schedule_global = torch.optim.lr_scheduler.ReduceLROnPlateau(optim_global, patience=1, verbose=True)
+        # print('att_training_begin')
+        global_model = gems_att_training(comm,model_global,model_temp,optim_global,device,lr_schedule_global,source_loader, global_epoch,criterion_1,criterion_2,criterion_kd,criterion_kl,test_loader)
+        test_ACC, test_SPE, test_REC, test_AUC = contrastive_global_test_method(global_model, test_loader,device)
+        tqdm.write(f'commu_round {comm-1:01d}: test_ACC_gems={test_ACC:.4f}, ' 
+                                f'test_SPE_gems= {test_SPE:.4f}, '
+                                f'test_REC_gems= {test_REC:.4f}, '
+                                f'test_AUC_gems= {test_AUC:.4f}')
 
-
-        mnist_dataset = torchvision.datasets.ImageFolder(root='/home/zhianhuang/Imagenet/val',transform=data_transform)
-    mnist_sample_one=[]
-
-    for images, labels in mnist_dataset:
-        if labels== class_one:
-            # print('images',images.numpy.shape)
-            mnist_sample_one.append(abs(images.numpy()))
-
-    mnist_sample_one=np.array(mnist_sample_one)
-
-    mnist_sample_one=mnist_sample_one.astype(float)
-    
-    return mnist_sample_one
-    
-def obtain_mnist(dataname,image_size, class_one):
-    if dataname=="mnist":
-        mnist_dataset = MNIST(root='./MNIST_data',
-                         train=True,
-                         transform=transforms.Compose([GrayscaleToRgb(), transforms.ToTensor()]),
-                         download=True)
-    if dataname=="cifar-10":
-        
-        transform = transforms.Compose([transforms.Scale(image_size),
-                                transforms.ToTensor(),
-                                # transforms.Grayscale(num_output_channels=1),
-                                transforms.Normalize(mean=([0.5,0.5,0.5]), std=([0.5,0.5,0.5]))])
-        mnist_dataset = dsets.CIFAR10(root='./CIFAR_data',
-                         train=True,
-                         transform=transform,
-                         download=True)
-    if dataname == 'imagenet':
-        data_transform = transforms.Compose([
-        transforms.Resize((image_size,image_size), interpolation=3),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                    	     std=[0.229, 0.224, 0.225])
-    ])
-
-
-        mnist_dataset = torchvision.datasets.ImageFolder(root='/home/zhianhuang/Imagenet/val',transform=data_transform)
-    mnist_sample_one=[]
-
-    for images, labels in mnist_dataset:
-        if labels== class_one:
-            # print('images',images.numpy.shape)
-            mnist_sample_one.append(images.numpy())
-
-    mnist_sample_one=np.array(mnist_sample_one)
-
-    mnist_sample_one=mnist_sample_one.astype(float)
-    
-    return mnist_sample_one
-
-def generate_training_samples(data_name, image_size,PT_similarity_index,HC_similarity_index):
-    PT_mnist_sample_arr_ = obtain_mnist(data_name,image_size,PT_similarity_index)
-    HC_mnist_sample_arr_ = obtain_mnist(data_name,image_size,HC_similarity_index)
-    PT_mnist_label = np.zeros(len(PT_mnist_sample_arr_))
-    HC_mnist_label = np.ones(len(HC_mnist_sample_arr_))
-    PT_mnist_tensor = torch.tensor(PT_mnist_sample_arr_)
-    HC_mnist_tensor = torch.tensor(HC_mnist_sample_arr_)
-    PT_mnist_label_tensor = torch.tensor(PT_mnist_label)
-    HC_mnist_label_tensor = torch.tensor(HC_mnist_label)
-    mnist_data = torch.cat([PT_mnist_tensor, HC_mnist_tensor],0)
-    mnist_label = torch.cat([PT_mnist_label_tensor, HC_mnist_label_tensor],0)
-    index = [i for i in range(len(mnist_data))]
-    random.shuffle(index)
-    mnist_data = mnist_data[index]
-    mnist_label = mnist_label[index]
-    # print('mnist_label',mnist_label)
-    dataset = TensorDataset(mnist_data, mnist_label)
-    return dataset
-
-
-def obtain_xray(image_size, all_dataset, all_label):
-    HC_index = np.where(all_label==1)[0]
-    PT_index = np.where(all_label==0)[0]
-    HC_dataset = all_dataset[HC_index]
-    PT_dataset = all_dataset[PT_index]
-    HC_label = all_label[HC_index]
-    PT_label = all_label[PT_index]
-
-    test_transformer = transforms.Compose([
-            transforms.Resize((image_size, image_size), interpolation=3),
-            transforms.ToTensor()
-            ])
-    aug_transformer = transforms.Compose([
-            transforms.Resize((image_size, image_size), interpolation=3),
-            transforms.RandomRotation(20),
-            transforms.RandomHorizontalFlip(p=0.2),
-            transforms.ToTensor()
-            ])
-    HC_ind = random.sample(range(0, len(HC_dataset)-1), labeled_num)
-    PT_ind = random.sample(range(0, len(PT_dataset)-1), labeled_num)
-    # HC_ind = random.sample(range(0, len(HC_dataset)-1), int(len(HC_dataset)*labeled_per))
-    # PT_ind = random.sample(range(0, len(PT_dataset)-1), int(len(PT_dataset)*labeled_per))
-    # HC_ind = [random.randint(0,len(HC_dataset)-1) for i in range(labeled_num)]
-    # PT_ind = [random.randint(0,len(PT_dataset)-1) for i in range(labeled_num)]
-    HC_all = [i for i in range(len(HC_dataset))]
-    PT_all = [i for i in range(len(PT_dataset))]
-    for i in HC_ind:
-        HC_all.remove(i)
-    for i in PT_ind:
-        PT_all.remove(i)
-    HC_unlabel_ind = HC_all
-    PT_unlabel_ind = PT_all
-    HC_labeled_sam=[]
-    PT_labeled_sam=[]
-    HC_labeled_sample_aug, PT_labeled_sample_aug = [],[]
-    HC_labeled_sample, PT_labeled_sample = [],[]
-    HC_unlabeled_sample_aug, PT_unlabeled_sample_aug = [],[]
-    HC_unlabeled_sample, PT_unlabeled_sample = [],[]
-    for i in HC_ind:
-        HC_labeled_sam.append(HC_dataset[i])
-    for i in PT_ind:
-        PT_labeled_sam.append(PT_dataset[i])
-
-    HC_lab = torch.tensor(np.array(HC_label)[HC_ind])
-    PT_lab = torch.tensor(np.array(PT_label)[PT_ind])
-    HC_unlabeled_sam,PT_unlabeled_sam=[],[]
-    for i in HC_unlabel_ind:
-        HC_unlabeled_sam.append(HC_dataset[i])
-    for i in PT_unlabel_ind:
-        PT_unlabeled_sam.append(PT_dataset[i])
-
-    # HC_unlabeled_sam= HC_dataset[HC_unlabel_ind]
-    # PT_unlabeled_sam= PT_dataset[PT_unlabel_ind]
-    HC_un_lab = np.array(HC_label)[HC_unlabel_ind]
-    PT_un_lab = np.array(PT_label)[PT_unlabel_ind]
-    for i in HC_labeled_sam:
-        img = test_transformer(i)
-        aug_img = aug_transformer(i)
-        HC_labeled_sample.append(img)
-        HC_labeled_sample_aug.append(aug_img)
-    for j in PT_labeled_sam:
-        img = test_transformer(j)
-        aug_img = aug_transformer(j)
-        PT_labeled_sample.append(img)
-        PT_labeled_sample_aug.append(aug_img)
-    for i in HC_unlabeled_sam:
-        img = test_transformer(i)
-        aug_img = aug_transformer(i)
-        HC_unlabeled_sample.append(img)
-        HC_unlabeled_sample_aug.append(aug_img)
-    for j in PT_unlabeled_sam:
-        img = test_transformer(j)
-        aug_img = aug_transformer(j)
-        PT_unlabeled_sample.append(img)
-        PT_unlabeled_sample_aug.append(aug_img)
-
-
-    HC_unlabeled_sample_arr = np.array([t.numpy() for t in HC_unlabeled_sample])
-    HC_unlabeled_aug_sample_arr = np.array([t.numpy() for t in HC_unlabeled_sample_aug])
-    PT_unlabeled_sample_arr = np.array([t.numpy() for t in PT_unlabeled_sample])
-    PT_unlabeled_aug_sample_arr = np.array([t.numpy() for t in PT_unlabeled_sample_aug])
-    HC_labeled_sample_arr = np.array([t.numpy() for t in HC_labeled_sample])
-    HC_labeled_sample_ten = torch.tensor(HC_labeled_sample_arr)
-    HC_labeled_aug_sample_arr = np.array([t.numpy() for t in HC_labeled_sample_aug])
-    HC_labeled_aug_sample_ten = torch.tensor(HC_labeled_aug_sample_arr)
-    PT_labeled_sample_arr = np.array([t.numpy() for t in PT_labeled_sample])
-    PT_labeled_sample_ten = torch.tensor(PT_labeled_sample_arr)
-    PT_labeled_aug_sample_arr = np.array([t.numpy() for t in PT_labeled_sample_aug])
-    PT_labeled_aug_sample_ten = torch.tensor(PT_labeled_aug_sample_arr)
-
-    labeled_data = np.concatenate([HC_labeled_sample_arr, PT_labeled_sample_arr])
-    labeled_aug_data = np.concatenate([HC_labeled_aug_sample_arr, PT_labeled_aug_sample_arr])
-    labeled_label = np.concatenate([HC_lab, PT_lab])
-    labeled_dataset = TensorDataset_aug(labeled_data,labeled_aug_data,labeled_label)
-
-    unlabeled_data = np.concatenate([HC_unlabeled_sample_arr, PT_unlabeled_sample_arr])
-    unlabeled_aug_data = np.concatenate([HC_unlabeled_aug_sample_arr, PT_unlabeled_aug_sample_arr])
-    unlabeled_label = np.concatenate([HC_un_lab, PT_un_lab])
-    unlabeled_dataset = TensorDataset_aug(unlabeled_data,unlabeled_aug_data,unlabeled_label)
-    return HC_labeled_sample_arr, PT_labeled_sample_arr,labeled_dataset,unlabeled_dataset
-
-def clean_data(HC_similarity_list_,PT_similarity_list_):
-    HC_similarity_list = copy.deepcopy(HC_similarity_list_)
-    PT_similarity_list = copy.deepcopy(PT_similarity_list_)
-    HC_similarity_clean = list(set(HC_similarity_list))
-    PT_similarity_clean = list(set(PT_similarity_list))
-    HC_similarity_clean_copy = copy.deepcopy(HC_similarity_clean)
-    PT_similarity_clean_copy = copy.deepcopy(PT_similarity_clean)
-    for i in HC_similarity_clean_copy:
-        if i in PT_similarity_clean_copy:
-            idx_HC = len(np.where(np.array(HC_similarity_list)==i)[0])
-            idx_PT = len(np.where(np.array(PT_similarity_list)==i)[0])
-            if idx_HC>idx_PT:
-                PT_similarity_clean.remove(i)
+    for epoch in range(1, epochs+1):
+        # print('epoch=',epoch,'idx=',idx)
+        #     batch_iterator = zip(loop_iterable(source_loader), loop_iterable(target_loader))
+        batch_iterator = zip(loop_iterable(source_loader),loop_iterable(labeled_loader) ,loop_iterable(unlabeled_loader))
+        for ind in range(iterations):
+            # print('comm=',comm,'epoch=',epoch,'iterations=',ind,'idx=',idx)
+            (x, y_true), (labeled_x,labeled_aug_data, y_target),(unlabeled_x,unlabeled_aug_data, unlabeled_label) = next(batch_iterator)
+            # print('eval1',idx)
+            x, y_true = x.to(device), y_true.to(device)
+            # print('eval2',idx)
+            labeled_x, y_target =  labeled_x.to(device), y_target.to(device)
+            # print('eval3',idx)
+            unlabeled_x, unlabeled_aug_data,unlabeled_label=unlabeled_x.to(device),unlabeled_aug_data.to(device),unlabeled_label.to(device)
+            # print('eval4',idx)
+            labeled_all = torch.cat([x, labeled_x], dim=0)
+            target_all = torch.cat([y_true, y_target], dim=0)
+            # print('data_to_device',idx)
+            # print('labeled_all',labeled_all.shape)
+            # print('target_all',target_all)
+            labeled_all = labeled_all.to(torch.float32)
+            target_all = target_all.to(torch.long)
+            _,y_pred,_,__ = model(labeled_all)
+            loss_ce = criterion_1(y_pred, target_all)
+            if epoch ==1 and ind<200:
+                # print('loss_ce',idx, loss_ce.item())
+                loss = loss_ce
+                optim.zero_grad()
+                loss.backward()
+                optim.step()
+                del loss
+                torch.cuda.empty_cache()
+                # print('initial_warm_up_done',idx)
             else:
-                HC_similarity_clean.remove(i)
-    return HC_similarity_clean,PT_similarity_clean
-def get_dataloader(data_name,image_size,class_num,HC_labeled_data,PT_labeled_data,labeled_dataset,unlabeled_dataset):
-    HC_labeled_data_ = np.reshape(HC_labeled_data,[-1, HC_labeled_data.shape[1]*HC_labeled_data.shape[2]*HC_labeled_data.shape[3]])
-    HC_labeled_datas_ = torch.tensor(HC_labeled_data_)
-    HC_labeled_data_ = cal_mean_row(HC_labeled_datas_)
-#    HC_labeled_data_ = HC_labeled_data_/torch.mean(HC_labeled_data_)
-    
-    PT_labeled_data_ = np.reshape(PT_labeled_data,[-1, PT_labeled_data.shape[1]*PT_labeled_data.shape[2]*PT_labeled_data.shape[3]])
-    PT_labeled_datas_ = torch.tensor(PT_labeled_data_)
-    PT_labeled_data_ = cal_mean_row(PT_labeled_datas_)
-#    PT_labeled_data_ = PT_labeled_data_/torch.mean(PT_labeled_data_)
+                ###### confident_supervised_contrastive_loss_calculation ####
+                condifent_index, unconfident_index, pseudo_label = obtain_cnn_confidence_index(model, unlabeled_x, unlabeled_label, ind,epoch,device,True)
+                # print('unlabeled_x',unlabeled_x.shape,idx)
+                # print('condifent_index_done',idx)
+                # print('condifent_index',condifent_index,idx)
+                # print('unconfident_index',unconfident_index,idx)
+                # unlabeled_x_temp = copy.deepcopy(unlabeled_x.cpu())
+                # unlabeled_x_=np.array(unlabeled_x_temp)
+                # print('unlabeled_x_',unlabeled_x.shape,idx)
+                confident_sample = torch.tensor(unlabeled_x[condifent_index])
+                # print('confident_sample',confident_sample.shape,idx)
+                confident_aug_sample = unlabeled_aug_data[condifent_index]
+                # print('confident_aug_sample',confident_aug_sample.shape,idx)
+                confident_sample=confident_sample.to(device)
+                # print('confident_sample',confident_sample.shape,idx)
+                confident_aug_sample=confident_aug_sample.to(device)
+                # print('confident_aug_sample',confident_aug_sample.shape,idx)
+                confident_sample_more = torch.cat([confident_sample,labeled_x])
+                # print('confident_sample_more',confident_sample_more.shape,idx)
+                labeled_aug_data=labeled_aug_data.to(device)
+                # print('labeled_aug_data',labeled_aug_data.shape,idx)
+                confident_sample_aug_more = torch.cat([confident_aug_sample,labeled_aug_data])
+                # del confident_aug_sample, labeled_aug_data
+                # torch.cuda.empty_cache()
+                unconfident_sample = torch.tensor(unlabeled_x[unconfident_index])
+                unconfident_aug_sample = unlabeled_aug_data[unconfident_index]
+                images = torch.cat([confident_sample_more, confident_sample_aug_more], dim=0)
+                # print('images',images.shape,idx)
+                # del confident_sample_aug_more
+                # torch.cuda.empty_cache()
+                if images.shape[0]!=0:
+                    pseudo_label = torch.tensor(pseudo_label).to(device)
+                    confident_label_more = torch.cat([pseudo_label,y_target])
+                    if torch.cuda.is_available():
+                        images = images.cuda(non_blocking=True)
+                        confident_label_more = confident_label_more.cuda(non_blocking=True)
+                    bsz_1 = confident_sample_more.shape[0]
+                    _,_, _, features_norm = model(images)
+                    
+                    f1, f2 = torch.split(features_norm, [bsz_1, bsz_1], dim=0)
+                    features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
+                    del _,f1, f2,features_norm
+                    torch.cuda.empty_cache()
+                    sup_condifent_loss_contrastive = criterion_2(features, confident_label_more)
+                    # print('sup_condifent_loss_contrastive',sup_condifent_loss_contrastive,idx)
+                ###### unconfident_contrastive_loss_calculation ####
 
+                images_unconfident = torch.cat([unconfident_sample, unconfident_aug_sample], dim=0)
+                # print('images_unconfident',images_unconfident.shape,idx)
+                if images_unconfident.shape[0]!=0:
+                    if torch.cuda.is_available():
+                        images_unconfident = images_unconfident.to(device)
+                        # print('images_unconfident',images_unconfident.shape,idx)
+                        # labels = labels.cuda(non_blocking=True)
+                    bsz = unconfident_sample.shape[0]
+                    _,_, __, features_norm = model(images_unconfident)
+                    f1_unconfident, f2_unconfident = torch.split(features_norm, [bsz, bsz], dim=0)
+                    features_unconfident = torch.cat([f1_unconfident.unsqueeze(1), f2_unconfident.unsqueeze(1)], dim=1)
+                    # print('features_unconfident',features_unconfident.shape,idx)
+                    del _,__,f1_unconfident, f2_unconfident,features_norm
+                    torch.cuda.empty_cache()
+                    unconfident_unsup_loss_contrastive = criterion_2(features_unconfident)
+                    # print('unconfident_unsup_loss_contrastive',unconfident_unsup_loss_contrastive,idx)
+                    del features_unconfident
+                    torch.cuda.empty_cache()
 
-    mnist_list=[]
-    
-    if data_name=="mnist":
+                ###### supervised_contrastive_centroid_alignment ####
+                # print('begin_sor_centroid',idx)
+                # x = x.type(torch.FloatTensor)
+                sor_centroid, _ = obtain_cnn_source_centroid_feature(model,x,y_true,device)
+                # print('sor_centroid',sor_centroid.shape,idx)
+                centroid_label = torch.tensor([0,1])
+                if confident_sample.shape[0]!=0 and unconfident_sample.shape[0]!=0:
+                    confident_unlabeled_centroid,_ = obtain_cnn_centroid_feature(model,confident_sample,device)
+                    unconfident_unlabeled_centroid,_ = obtain_cnn_centroid_feature(model,unconfident_sample,device)
+                    # print('confident_unlabeled_centroid_done',idx)
+                    # print('unconfident_unlabeled_centroid_done',idx)
+                # unlabeled_centroid, _ = obtain_cnn_centroid_feature(model,unlabeled_x)
+                
+                    confident_unlabeled_centroid = torch.tensor(confident_unlabeled_centroid)
+                    unconfident_unlabeled_centroid = torch.tensor(unconfident_unlabeled_centroid)
+                    sor_centroid = torch.tensor(sor_centroid)
+                    centroid_features_1 = torch.cat([confident_unlabeled_centroid.unsqueeze(1),sor_centroid.unsqueeze(1)], dim=1)
+                    centroid_features_2 = torch.cat([unconfident_unlabeled_centroid.unsqueeze(1),sor_centroid.unsqueeze(1)], dim=1)
+                # print('centroid_features',centroid_features.shape)
+                    centroid_contrastive_1= criterion_2(centroid_features_1,centroid_label)
+                    centroid_contrastive_2= criterion_2(centroid_features_2,centroid_label)
+                    # print('centroid_contrastive_1',centroid_contrastive_1.item())
+                    # print('centroid_contrastive_2',centroid_contrastive_2.item())
+                    centroid_contrastive = 0.5* centroid_contrastive_1+ 0.5*centroid_contrastive_2
+
+                if confident_sample.shape[0]==0 and unconfident_sample.shape[0]!=0:
+                    # confident_unlabeled_centroid,_ = obtain_cnn_centroid_feature(model,confident_sample)
+                    unconfident_unlabeled_centroid,_ = obtain_cnn_centroid_feature(model,unconfident_sample,device)
         
-        mnist_dataset = MNIST(root='./MNIST_data',
-                         train=True,
-                         transform=transforms.Compose([GrayscaleToRgb(), transforms.ToTensor()]),
-                         download=True)
-    if data_name=="cifar-10":
-        
-        transform = transforms.Compose([transforms.Scale(image_size),
-                                transforms.ToTensor(),
-                                # transforms.Grayscale(num_output_channels=1),
-                                transforms.Normalize(mean=([0.5,0.5,0.5]), std=([0.5,0.5,0.5]))])
-        mnist_dataset = dsets.CIFAR10(root='./CIFAR_data',
-                         train=True,
-                         transform=transform,
-                         download=True)
-    if data_name == 'imagenet':
-        data_transform = transforms.Compose([
-        transforms.Resize((image_size,image_size), interpolation=3),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                    	     std=[0.229, 0.224, 0.225])
-    ])
+                    unconfident_unlabeled_centroid = torch.tensor(unconfident_unlabeled_centroid)
+                    sor_centroid = torch.tensor(sor_centroid)
+                    centroid_features_2 = torch.cat([unconfident_unlabeled_centroid.unsqueeze(1),sor_centroid.unsqueeze(1)], dim=1)
+                    centroid_contrastive_2= criterion_2(centroid_features_2,centroid_label)
+                    # print('centroid_contrastive_1',centroid_contrastive_1.item())
+                    # print('centroid_contrastive_2',centroid_contrastive_2.item())
+                    centroid_contrastive = centroid_contrastive_2
+                    # print('centroid_contrastive',centroid_contrastive.shape)
+                
+                if confident_sample.shape[0]!=0 and unconfident_sample.shape[0]==0:
+                    confident_unlabeled_centroid,_ = obtain_cnn_centroid_feature(model,confident_sample,device)
+                    confident_unlabeled_centroid = torch.tensor(confident_unlabeled_centroid)
+                    sor_centroid = torch.tensor(sor_centroid)
+                    centroid_features_1 = torch.cat([confident_unlabeled_centroid.unsqueeze(1),sor_centroid.unsqueeze(1)], dim=1)
+                    centroid_contrastive_1= criterion_2(centroid_features_1,centroid_label)
+                    centroid_contrastive = centroid_contrastive_1
+
+                if images_unconfident.shape[0]!=0 and images.shape[0]!=0:
+                    loss = loss_ce + 0.5*sup_condifent_loss_contrastive +  0.5*unconfident_unsup_loss_contrastive + 0.5*centroid_contrastive
+                if images_unconfident.shape[0]==0 and images.shape[0]!=0:
+                    loss = loss_ce + 0.5*sup_condifent_loss_contrastive  +  0.5*centroid_contrastive
+                    # print('loss_ce',loss_ce.item())
+                    # print('condifent_loss_contrastive',sup_condifent_loss_contrastive.item())
+                    # print('centroid_contrastive',centroid_contrastive.item())
+                if images_unconfident.shape[0]!=0 and images.shape[0]==0:
+                    loss = loss_ce + 0.5*unconfident_unsup_loss_contrastive  + 0.5*centroid_contrastive
+                    # print('loss_ce',loss_ce.item())
+                    # print('unconfident_unsup_loss_contrastive',unconfident_unsup_loss_contrastive.item())
+                    # print('centroid_contrastive',centroid_contrastive.item())
+                # print('local_loss',loss.item())
+                # print('local_training_loss',idx,loss.item())
+                if optim is not None:
+                    optim.zero_grad()
+                    loss.backward()
+                    optim.step()
+                    del loss
+                    torch.cuda.empty_cache()
+        # test_AUC = train_test(model, device, test_loader)
+        # print('local_test_AUC',idx, test_AUC)
+    model.cpu()
+    torch.save(model.state_dict(),'local_model/'+'att_local_test_'+str(idx)+'.pt')  
+    # print('save_model_done')
 
 
-        mnist_dataset = torchvision.datasets.ImageFolder(root='/home/zhianhuang/Imagenet/val',transform=data_transform)
-    mnist_sample_one=[]
-    images_list=[]
-    labels_list=[]
-    for images, labels in mnist_dataset:
-        labels_list.append(labels)
-        mnist_sample_one.append(abs(images.numpy()))
-#        images_list.append(images.numpy())
-
-    mnist_sample_one=np.array(mnist_sample_one)
-    labels_list_array=np.array(labels_list)
-    mnist_sample_one=mnist_sample_one.astype(float)
+def obtain_cnn_confidence_index(exp_1, data_0, target,ind,epoch,device,entro):
+#    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    exp_1.eval()
+    features_list = []
+    labels_list = []
+    pred_list = []
+    import torch
+    # import torch.nn as nn
+    with torch.no_grad():
+        data = data_0.type(torch.FloatTensor).to(device)
+        del data_0
+        torch.cuda.empty_cache()
+        # print(data.shape)
+        target = target.type(torch.FloatTensor)
+        _,outputs, feas,_ = exp_1(data)
+        # feas = exp_1.classifier[2](data)
+        # print('feas',feas.shape)
+        # x = exp_1.feature_extractor(data)
+        # x = x.view(data.shape[0], -1)
+        # # print('feas_',x.shape)
+        # for i in range(len(exp_1.classifier)):
+        #     # print('i',i)
+        #     x = exp_1.classifier[i](x)
+        #     if i == 2:
+        #         feas = x
+        # print(feas.shape)
+        outputs = outputs.float().cpu()
+        all_fea = feas.float().cpu()
+        for i in range(len(outputs)):
+            pred_list.append(outputs[i])
+            features_list.append(all_fea[i])
+            labels_list.append(target[i])
+        # outputs = outputs.float().cpu()
+        # all_fea = feas.float().cpu()
+        # for i in range(len(outputs)):
+        #     pred_list.append(outputs[i])
+        #     features_list.append(all_fea[i])
+        #     labels_list.append(target[i])
+    if entro==True:
+        condifent_index, pseudo_label = pseudo_generation_with_entropy_selection(pred_list, features_list, labels_list,ind,epoch)
+    else:
+        condifent_index, pseudo_label = pseudo_generation_with_weighted_selection(pred_list, features_list, labels_list,ind,epoch)
+    # condifent_index, pseudo_label = pseudo_generation_with_entropy_selection(pred_list, features_list, labels_list,ind,epoch)
+    # print('condifent_index',len(condifent_index))
+    # print('pseudo_label',len(pseudo_label))
+    all_index = [i for i in range(len(features_list))]
+    confident_idx =[]
+    for i in condifent_index:
+        confident_idx.append(i)
+        all_index.remove(i)
+    unconfident_index = all_index
+    # print('unconfident_index',unconfident_index)
     
-    for kk in range(class_num):
-        ind_k=np.where(labels_list_array==kk)[0]
-        mnist_sample_arr_ = mnist_sample_one[ind_k].astype(float)
-        mnist_sample_arr = np.reshape(mnist_sample_arr_,[-1, mnist_sample_arr_.shape[1]*mnist_sample_arr_.shape[2]*mnist_sample_arr_.shape[3]])
-        mnist_sample_arrs = torch.tensor(mnist_sample_arr)
-        mnist_scale = cal_mean_row(mnist_sample_arrs)
-#        mnist_scale = mnist_sample_arr/torch.mean(mnist_sample_arr)
-        mnist_list.append(mnist_scale)
-    HC_similarity, HC_similarity_index = obtain_similarity(HC_labeled_data_,mnist_list)
-    PT_similarity, PT_similarity_index = obtain_similarity(PT_labeled_data_,mnist_list) 
-    print('HC_similarity',HC_similarity)
-    print('PT_similarity',PT_similarity)
-    print('HC_similarity_index',HC_similarity_index)
-    print('PT_similarity_index',PT_similarity_index)
-    if HC_similarity_index==PT_similarity_index:
-        if HC_similarity[HC_similarity_index]<=PT_similarity[PT_similarity_index]:
-            HC_similarity_index=HC_similarity_index
-            seconde_ind = seconde_min(PT_similarity)
-            PT_similarity_index=seconde_ind
-        if HC_similarity[HC_similarity_index]>PT_similarity[PT_similarity_index]:
-            PT_similarity_index=PT_similarity_index
-            seconde_ind = seconde_min(HC_similarity)
-            HC_similarity_index=seconde_ind
-    print('revised_HC_similarity_index',HC_similarity_index)
-    print('revised_PT_similarity_index',PT_similarity_index)
+    return  confident_idx, unconfident_index, pseudo_label
+
+def obtain_cnn_centroid_feature(exp_1, data_0,device):
+#    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    import torch
+    # import torch.nn as nn
+    exp_1.eval()
+    features_list = []
+    pred_list = []
+    with torch.no_grad():
+        data = data_0.type(torch.FloatTensor).to(device)
+        del data_0
+        torch.cuda.empty_cache()
+        # print(data.shape)
+        _,outputs, feas,_ = exp_1(data)
+        # feas = exp_1.classifier[2](data)
+        # print('feas',feas.shape)
+        # x = exp_1.feature_extractor(data)
+        # x = x.view(data.shape[0], -1)
+        # # print('feas_',x.shape)
+        # for i in range(len(exp_1.classifier)):
+        #     # print('i',i)
+        #     x = exp_1.classifier[i](x)
+        #     if i == 2:
+        #         feas = x
+        # print(feas.shape)
+        outputs = outputs.float().cpu()
+        all_fea = feas.float().cpu()
+        for i in range(len(outputs)):
+            pred_list.append(outputs[i])
+            features_list.append(all_fea[i])
+
+    centroid, feature = extract_centroid_feature(pred_list, features_list)
+    return  centroid, feature
+
+def obtain_cnn_source_centroid_feature(exp_1, data,target,device):
+    import torch
+    # import torch.nn as nn
+#    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # data=data.cpu()
+    # data = data.type(torch.FloatTensor).to(device)
+    exp_1.eval()
+    features_list = []
+    pred_list = []
+    target_list=[]
+    # print('begin_eval_1')
+    with torch.no_grad():
+        # print('begin_eval_2')
+        data = data.to(torch.float32)
+        # data = data.type(torch.FloatTensor) ### here
+        # print('begin_eval_3')
+        # print('data',data.shape)
+        # target = target.type(torch.FloatTensor).to(device) ### here
+        # print('target',target.shape)
+        # del data_0
+        # torch.cuda.empty_cache()
+        # print(data.shape)
+        _,outputs, feas,_ = exp_1(data)
+        # print('get_outputs',outputs.shape)
+        # feas = exp_1.classifier[2](data)
+        # print('feas',feas.shape)
+        # x = exp_1.feature_extractor(data)
+        # x = x.view(data.shape[0], -1)
+        # # print('feas_',x.shape)
+        # for i in range(len(exp_1.classifier)):
+        #     # print('i',i)
+        #     x = exp_1.classifier[i](x)
+        #     if i == 2:
+        #         feas = x
+        # print(feas.shape)
+        outputs = outputs.float().cpu() # here
+        all_fea = feas.float().cpu() #here
+        for i in range(len(outputs)):
+            pred_list.append(outputs[i])
+            features_list.append(all_fea[i])
+            # features_list.append(feas[i])
+            target_list.append(target[i].cpu())
     
-    # sor_dataset = generate_training_samples(data_name,image_size,PT_similarity_index,HC_similarity_index)
+    # print('begin_extract_source_labeled_centroid_feature')
+    centroid, feature = extract_source_labeled_centroid_feature(pred_list, features_list,target_list)
+    return  centroid, feature
+
+def extract_centroid_feature(pred_list, feature_list):
+    import torch
+    import torch.nn as nn
+#    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    cf_1 = torch.stack(list(feature_list)).cpu()
+    all_fea_1 = torch.cat((cf_1, torch.ones(cf_1.size(0), 1)), 1)
+    all_fea_1 = (all_fea_1.t() / torch.norm(all_fea_1, p=2, dim=1)).t()
+    all_fea_1 = all_fea_1.float().cpu().numpy()
+    output_1 = torch.stack(list(pred_list))
+    output_1 = nn.Softmax()(output_1)
+    _, pred_1 = torch.max(output_1, 1)
+    aff_1 = output_1.float().cpu().numpy()
+    initc_1 = aff_1.transpose().dot(all_fea_1)
+    initc_1 = initc_1 / (1e-8 + aff_1.sum(axis=0)[:, None])
+    K_1 = output_1.size(1)
+    cls_count_1 = np.eye(K_1)[pred_1].sum(axis=0)
+    labelset_1 = np.where(cls_count_1 > 0)[0]
+    dd_1 = cdist(all_fea_1, initc_1[labelset_1], 'cosine')
+    pred_label_1 = dd_1.argmin(axis=1)
+    pred_label_1 = labelset_1[pred_label_1]
+
+    for round in range(5):
+        aff_1 = np.eye(K_1)[pred_label_1]
+        initc_1 = aff_1.transpose().dot(all_fea_1)
+        initc_1 = initc_1 / (1e-8 + aff_1.sum(axis=0)[:, None])
+        dd_1 = cdist(all_fea_1, initc_1[labelset_1], 'cosine')
+        pred_label_1 = dd_1.argmin(axis=1)
+        # print('pred_label_1',pred_label_1)
+        pred_label_1 = labelset_1[pred_label_1]
+    # print('pred_label_1',pred_label_1)
+    return initc_1, all_fea_1
+
+def extract_source_labeled_centroid_feature(pred_list, feature_list,label_list):
+    import torch
+    import torch.nn as nn
+    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    all_label = torch.stack(list(label_list))
+    cf_1 = torch.stack(list(feature_list))
+    all_fea_1 = torch.cat((cf_1, torch.ones(cf_1.size(0), 1)), 1)
+    all_fea_1 = (all_fea_1.t() / torch.norm(all_fea_1, p=2, dim=1)).t()
+    all_fea_1 = all_fea_1.float().cpu().numpy()
+    output_1 = torch.stack(list(pred_list))
+    output_1 = nn.Softmax()(output_1)
+    # _, pred_1 = torch.max(output_1, 1)
+    pred_1 = all_label.to(torch.int64)
+    # print('pred_1',pred_1)
+    # print('pred_2',pred_2)
+    aff_1 = output_1.float().cpu().numpy() ####here
+    # aff_1 = output_1
+    initc_1 = aff_1.transpose().dot(all_fea_1)
+    initc_1 = initc_1 / (1e-8 + aff_1.sum(axis=0)[:, None])
+    K_1 = output_1.size(1)
+    cls_count_1 = np.eye(K_1)[pred_1].sum(axis=0)
+    labelset_1 = np.where(cls_count_1 > 0)[0]
+    dd_1 = cdist(all_fea_1, initc_1[labelset_1], 'cosine')
+    pred_label_1 = dd_1.argmin(axis=1)
+    pred_label_1 = labelset_1[pred_label_1]
+
+    for round in range(5):
+        aff_1 = np.eye(K_1)[pred_label_1]
+        initc_1 = aff_1.transpose().dot(all_fea_1)
+        initc_1 = initc_1 / (1e-8 + aff_1.sum(axis=0)[:, None])
+        dd_1 = cdist(all_fea_1, initc_1[labelset_1], 'cosine')
+        pred_label_1 = dd_1.argmin(axis=1)
+        # print('pred_label_1',pred_label_1)
+        pred_label_1 = labelset_1[pred_label_1]
+    # print('pred_label_1',pred_label_1)
+    return initc_1, all_fea_1
+
+def pseudo_generation_with_weighted_selection(pred_list, feature_list, label_list,ind,epoch):
+    import torch
+    import torch.nn as nn
+#    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    all_label = torch.stack(list(label_list))
+    cf_1 = torch.stack(list(feature_list))
+    all_fea_1 = torch.cat((cf_1, torch.ones(cf_1.size(0), 1)), 1)
+    all_fea_1 = (all_fea_1.t() / torch.norm(all_fea_1, p=2, dim=1)).t()
+    all_fea_1 = all_fea_1.float().cpu().numpy()
+    output_1 = torch.stack(list(pred_list))
+    output_1 = nn.Softmax()(output_1)
+    # print('output_1',output_1)
+    # print('output_1', output_1.shape)
+    _, pred_1 = torch.max(output_1, 1)
+    true_label_1 = copy.deepcopy(output_1)
+    # print('pred_1',pred_1)
+    # print('true_label_1', len(np.unique(all_label)))
+    confidence_list_1 = []
+    for i in range(output_1.shape[0]):
+        if np.where(output_1[i] >= threshold_value)[0].tolist() != []:
+            confidence_list_1.append(i)
+    if len(confidence_list_1)==0:
+        for i in range(output_1.shape[0]):
+            if np.where(output_1[i] >= 0.6)[0].tolist() != []:
+                confidence_list_1.append(i)
+    if len(confidence_list_1)==0:
+        for i in range(output_1.shape[0]):
+            if np.where(output_1[i] >= 0.55)[0].tolist() != []:
+                confidence_list_1.append(i)
+    # print('confidence_list_1', confidence_list_1)
+    confidence_array = np.array(confidence_list_1)
+    condi_label = all_label[np.array(confidence_array)]
+    # print('condi_label', len(np.unique(condi_label)))
+
+    aff_1 = output_1.float().cpu().numpy()
+    initc_1 = aff_1.transpose().dot(all_fea_1)
+    initc_1 = initc_1 / (1e-8 + aff_1.sum(axis=0)[:, None])
+    K_1 = output_1.size(1)
+    cls_count_1 = np.eye(K_1)[pred_1].sum(axis=0)
+    labelset_1 = np.where(cls_count_1 > 0)[0]
+    dd_1 = cdist(all_fea_1, initc_1[labelset_1], 'cosine')
+    pred_label_1 = dd_1.argmin(axis=1)
+    pred_label_1 = labelset_1[pred_label_1]
+
+    for round in range(5):
+        aff_1 = np.eye(K_1)[pred_label_1]
+        initc_1 = aff_1.transpose().dot(all_fea_1)
+        initc_1 = initc_1 / (1e-8 + aff_1.sum(axis=0)[:, None])
+        dd_1 = cdist(all_fea_1, initc_1[labelset_1], 'cosine')
+        pred_label_1 = dd_1.argmin(axis=1)
+        # print('pred_label_1',pred_label_1)
+        pred_label_1 = labelset_1[pred_label_1]
+#    print('all_fea_1',all_fea_1.shape)
+#    print('initc_1',initc_1.shape)
+#    print('dd_1',dd_1)
+    # print('pred_label_1',pred_label_1)
+
+    # acc_1 = np.sum(guess_label_1 == all_label.float().numpy()) / len(all_label_idx_1)
+    two_correct_index_1 = []
+    for i in range(pred_label_1.shape[0]):
+        if np.array(true_label_1.argmax(1, keepdim=True)[i][0]) == pred_label_1[i]:
+            two_correct_index_1.append(i)
+    # print('two_correct_index_1',two_correct_index_1)
+    inddd_1 = []
+    for i in two_correct_index_1:
+        if i in confidence_list_1:
+            inddd_1.append(i)
+
+    aug_array_1 = np.array(inddd_1)
+    # print('aug_array_1', aug_array_1)
+    if epoch==1:
+#    aug_label_1 = pred_label_1[aug_array_1]
+        aug_label_1 = all_label[aug_array_1]
+    if epoch>1:
+        if ind<=200:
+            aug_label_1 = all_label[aug_array_1]
+        else:
+            aug_label_1 = pred_label_1[aug_array_1]
+    # print('aug_label_1_unique',aug_label_1)
+#    ppp_label_1 = all_label[aug_array_1]
+    # print('ppp_label_1',ppp_label_1)
+#    acc_1 = np.sum(aug_label_1 == ppp_label_1.float().numpy()) / len(ppp_label_1)
+#    print('acc_1', acc_1)
+    return aug_array_1, aug_label_1
+
+
+def pseudo_generation_with_entropy_selection(pred_list, feature_list, label_list,ind,epoch):
+    import torch
+    import torch.nn as nn
+#    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    all_label = torch.stack(list(label_list))
+    cf_1 = torch.stack(list(feature_list))
+    all_fea_1 = torch.cat((cf_1, torch.ones(cf_1.size(0), 1)), 1)
+    all_fea_1 = (all_fea_1.t() / torch.norm(all_fea_1, p=2, dim=1)).t()
+    all_fea_1 = all_fea_1.float().cpu().numpy()
+    output_1 = torch.stack(list(pred_list))
+    output_1 = nn.Softmax()(output_1)
+    # print('output_1',output_1)
+    # print('output_1', output_1.shape)
+    _, pred_1 = torch.max(output_1, 1)
+    true_label_1 = copy.deepcopy(output_1)
+    # print('pred_1',pred_1)
+    # print('true_label_1', len(np.unique(all_label)))
+
+    ent_1 = torch.sum(-output_1 * torch.log(output_1 + 1e-5), dim=1) / np.log(2)
+    ent_1 = ent_1.float().cpu()
+    ent_dict = []
+    for i in range(len(ent_1)):
+        ent_dict.append(ent_1[i])
+    ent_dict = np.array(ent_dict)
+
+    kmeans_1 = KMeans(2, random_state=0).fit(ent_1.reshape(-1, 1))
+    labels_1 = kmeans_1.predict(ent_1.reshape(-1, 1))
+    idx_1 = []
+    for i in range(2):
+        idx_ = np.where(labels_1 == i)[0]
+        idx_1.append(idx_)
+    iidx_1 = 0
+    temp_1 = [ent_1[idx_1[i]].mean() for i in range(len(idx_1))]
+    # print(temp_1)
+    temp_array_1 = np.array(temp_1)
+    iidx_1 = np.argmax(temp_array_1)
+    # print(iidx_1)
+    known_idx_1 = np.where(kmeans_1.labels_ != iidx_1)[0]
+    uncertain_idx_1 = np.where(kmeans_1.labels_ == iidx_1)[0]
+
+    all_fea_1 = all_fea_1[known_idx_1, :]
+    output_1 = output_1[known_idx_1, :]
+    pred_1 = pred_1[known_idx_1]
+    all_label_idx_1 = all_label[known_idx_1]
+    ENT_THRESHOLD_1 = (kmeans_1.cluster_centers_).mean()
+
+    # print('pred_2',pred_2)
+    aff_1 = output_1.float().cpu().numpy()
+    initc_1 = aff_1.transpose().dot(all_fea_1)
+    initc_1 = initc_1 / (1e-8 + aff_1.sum(axis=0)[:, None])
+    K_1 = output_1.size(1)
+    cls_count_1 = np.eye(K_1)[pred_1].sum(axis=0)
+    labelset_1 = np.where(cls_count_1 > 0)[0]
+    dd_1 = cdist(all_fea_1, initc_1[labelset_1], 'cosine')
+    pred_label_1 = dd_1.argmin(axis=1)
+    pred_label_1 = labelset_1[pred_label_1]
+
+    for round in range(5):
+        aff_1 = np.eye(K_1)[pred_label_1]
+        initc_1 = aff_1.transpose().dot(all_fea_1)
+        initc_1 = initc_1 / (1e-8 + aff_1.sum(axis=0)[:, None])
+        dd_1 = cdist(all_fea_1, initc_1[labelset_1], 'cosine')
+        pred_label_1 = dd_1.argmin(axis=1)
+        # print('pred_label_1',pred_label_1)
+        pred_label_1 = labelset_1[pred_label_1]
     
-    
+    if epoch==1:
+#    aug_label_1 = pred_label_1[aug_array_1]
+        aug_label_1 = all_label[known_idx_1]
+    if epoch>1:
+        if ind<=200:
+            aug_label_1 = all_label[known_idx_1]
+        else:
+            aug_label_1 = pred_label_1
+    # print('aug_label_1_unique',aug_label_1)
 
-    # sor_dataset, labeled_dataset, unlabeled_dataset = divide_labeled(HC_img, HC_label,cov_img,cov_label,class_one, class_two, data_name, image_size)
-    
-    # source_loader = DataLoader(sor_dataset, batch_size=batch_size,
-    #                            shuffle=True, num_workers=0, pin_memory=True)
-    labeled_loader = DataLoader(labeled_dataset, batch_size=batch_size,
-                               shuffle=True, num_workers=14, pin_memory=True)
-    unlabeled_loader = DataLoader(unlabeled_dataset, batch_size=batch_size,
-                               shuffle=True, num_workers=14, pin_memory=True)
-    return labeled_loader,unlabeled_loader,HC_similarity_index,PT_similarity_index
-
-def obtain_mnist_global(dataname,image_size, class_one):
-    if dataname=="mnist":
-        mnist_dataset = MNIST(root='./MNIST_data',
-                         train=True,
-                         transform=transforms.Compose([GrayscaleToRgb(), transforms.ToTensor()]),
-                         download=True)
-    if dataname=="cifar-10":
-        
-        transform = transforms.Compose([transforms.Scale(image_size),
-                                transforms.ToTensor(),
-                                # transforms.Grayscale(num_output_channels=1),
-                                transforms.Normalize(mean=([0.5,0.5,0.5]), std=([0.5,0.5,0.5]))])
-        mnist_dataset = dsets.CIFAR10(root='./CIFAR_data',
-                         train=True,
-                         transform=transform,
-                         download=True)
-    if dataname == 'imagenet':
-        data_transform = transforms.Compose([
-        transforms.Resize((image_size,image_size), interpolation=3),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                    	     std=[0.229, 0.224, 0.225])
-    ])
+    # guess_label_1 = 2 * np.ones(len(all_label), )
+    # guess_label_1[known_idx_1] = pred_label_1
 
 
-        mnist_dataset = torchvision.datasets.ImageFolder(root='/home/zhianhuang/Imagenet/val',transform=data_transform)
-    mnist_sample_one=[]
-
-    for images, labels in mnist_dataset:
-        if labels in class_one:
-            # print('images',images.numpy.shape)
-            mnist_sample_one.append(images.numpy())
-
-    # mnist_sample_one=np.array(mnist_sample_one)
-    rand_idx = [i for i in range(len(mnist_sample_one))]
-    source_sel = random.sample(rand_idx, source_num)
-    mnist_sample_one=np.array(mnist_sample_one)[source_sel]
-
-    # mnist_sample_one=np.array(mnist_sample_one)
-
-    mnist_sample_one=mnist_sample_one.astype(float)
-    
-    return mnist_sample_one
-
-def generate_training_samples_global(data_name, image_size,PT_similarity_index,HC_similarity_index):
-    aug_transformer = transforms.Compose([
-            transforms.Resize((image_size, image_size), interpolation=3),
-            transforms.RandomRotation(20),
-            transforms.RandomHorizontalFlip(p=0.2),
-            transforms.ToTensor()
-            ])
-    PT_mnist_sample_arr_ = obtain_mnist_global(data_name,image_size,PT_similarity_index)
-    HC_mnist_sample_arr_ = obtain_mnist_global(data_name,image_size,HC_similarity_index)
-    PT_mnist_label = np.zeros(len(PT_mnist_sample_arr_))
-    HC_mnist_label = np.ones(len(HC_mnist_sample_arr_))
-    PT_mnist_tensor = torch.tensor(PT_mnist_sample_arr_)
-    HC_mnist_tensor = torch.tensor(HC_mnist_sample_arr_)
-    PT_mnist_label_tensor = torch.tensor(PT_mnist_label)
-    HC_mnist_label_tensor = torch.tensor(HC_mnist_label)
-    mnist_data = torch.cat([PT_mnist_tensor, HC_mnist_tensor],0)
-    mnist_label = torch.cat([PT_mnist_label_tensor, HC_mnist_label_tensor],0)
-    index = [i for i in range(len(mnist_data))]
-    random.shuffle(index)
-    mnist_data = mnist_data[index]
-    # mnist_data_arr = np.array(mnist_data.transpose(0, 2, 3, 1))
-    # print('mnist_data_arr',mnist_data_arr.shape)
-    mnist_label = mnist_label[index]
-    # aug_source=[]
-    # for i in mnist_data:
-    #     image = torchvision.transforms.functional.to_pil_image(i)
-    #     aug_img = aug_transformer(image)
-    #     aug_source.append(aug_img)
-
-    # aug_data = np.array([t.numpy() for t in aug_source])
-    # aug_data=torch.tensor(aug_data)
-    # print('aug_data',aug_data.shape)
-    dataset = TensorDataset(mnist_data,mnist_label)
-
-    # print('mnist_label',mnist_label)
-    # dataset = TensorDataset(mnist_data, mnist_label)
-    return dataset
+#    ppp_label_1 = all_label[aug_array_1]
+    # print('ppp_label_1',ppp_label_1)
+#    acc_1 = np.sum(aug_label_1 == ppp_label_1.float().numpy()) / len(ppp_label_1)
+#    print('acc_1', acc_1)
+    return known_idx_1, aug_label_1
 
 
-def start_client(paras):
-    # print("start client")
-    c = lcoal_training(paras[0],paras[1], paras[2], paras[3],paras[4],paras[5], paras[6],paras[7],paras[8],paras[9],paras[10])
+def client_prediction(data,label,model):
+    logit=[]
+    preds=[]
+    ent=[]
+    incor_ind_list=[]
+    for i in range(num_clients): ### 全部data
+        model.load_state_dict(torch.load('local_model/'+'att_local_test_'+str(idx)+'.pt'))
+        with torch.no_grad():
+            y_pred,_,__ = model(data)
+            y_pred = nn.Softmax()(y_pred)
+            y_preds = y_pred.max(1)[1]
+#             print('y_pred',y_preds)
+#             print('label',label)
+            incor_idx = torch.where(y_preds != label)[0].tolist()
+#             print('incor_idx',incor_idx)
+            ent_1 = torch.sum(-y_pred * torch.log(y_pred + 1e-5), dim=1) / np.log(2)
+#             print(ent_1)
+            ent_1 = ent_1.float().cpu()
+            ent_1[incor_idx]=0
+            logit.append(np.array(y_pred.cpu()))
+            preds.append(np.array(y_preds.cpu()))
+            ent.append(np.array(ent_1))
+            incor_ind_list.append(incor_idx)
+    logit_ = torch.tensor(logit)
+#     print('logit_',logit_.shape)
+    ent_ = torch.tensor(ent)
+#     print('ent_',ent_.shape)
+    xxx=[]
+    for i in range(logit_.shape[0]):
+        d=logit_[i].T*ent_[i]
+        x=d.T
+        xxx.append(np.array(x))
+    weighted_logit=torch.mean(torch.tensor(xxx),0)
+    # preds_ =torch.tensor(preds)
+    return weighted_logit
 
-def avg_parameter(model_list,coefficient_matrix):
-    for i in range(num_clients):
-        model_list[i].load_state_dict(torch.load('local_model/'+'att_local_test_'+str(i)+'.pt'))
-    federated_average(model_list, coefficient_matrix, False) # fedavg algorithm
-    return model_list
+def merge(d1, d2): 
+    d = {**d1, **d2}
+    return d
 
-def main():
-    # print('args.hint_layers',args.hint_layers)
-    # print('args.guide_layers',args.guide_layers)
-    
-    # for param in sorted(vars(args).keys()):
-    #     print('--{0} {1}'.format(param, vars(args)[param]))
-    
-    
 
-    # criterion_kl = DistillKL(args.temperature)
-    if data_name == 'mnist':
-        # model_global = models.__dict__['wrn28x2'](num_classes=50)
-        # model_t.load_state_dict(torch.load(args.trained_dir))
-        model = models.__dict__['wrn16x2'](num_classes=50)
+def gems_training(comm_round,model,optim,device,lr_schedule,global_loader, global_epoch,criterion_1):
+    model.to(device)
+    for epoch in range(1, global_epoch+1):
+        # print('epoch',epoch)
+        cor_idx_list=[]
+        logits_list=[]
+        #     batch_iterator = zip(loop_iterable(source_loader), loop_iterable(target_loader))
+        # batch_iterator = zip(loop_iterable(labeled_loader) ,loop_iterable(unlabeled_loader))
+        for ind, (data,label) in enumerate(global_loader):
+            labeled_all,target_all =  data.to(device), label.to(device)
+            bsz = labeled_all.shape[0]
+            # print('labeled_all',labeled_all.shape)
+            # print('target_all',target_all)
+            labeled_all = labeled_all.to(torch.float32)
+            target_all = target_all.to(torch.long)
+            y_preds,_,__ = model(labeled_all)
+            y_pred = y_preds.max(1)[1]
+            true_idx = torch.where(torch.eq(y_pred,target_all)==True)[0].tolist()
+#             print('true_idx',len(true_idx))
+            false_idx = [i for i in range(bsz)]
+#             print('len',len(true_idx))
+            if len(true_idx)!=0 and len(true_idx)!=bsz:
+#                 print('len(true_idx)!=0 and len(true_idx)!=bsz')
+                for i in true_idx:
+                    false_idx.remove(i)
+                    cor_idx_list.append(bsz*ind+i) ### 需要check ind对不对
+                    logits_list.append(y_preds[i])
+#                 print('cor_idx_list',cor_idx_list)
+                true_pred=y_preds[true_idx].clone()
+                true_label =target_all[true_idx].clone()
+#                 print('true_pred',true_pred.shape)
+                loss_true1 =criterion_1(true_pred, true_label) ### 预测对的数据
+                if comm_round==0:
+                    logits_pool = dict(zip(cor_idx_list,logits_list))
+#                     print('logits_pool',logits_pool.keys())
+                    np.save('global_model/att_global_test_'+'logit_dict.npy', logits_pool) 
+                else:
+                    logits_pool_pre = np.load('global_model/att_global_test_'+'logit_dict.npy',allow_pickle=True).item()
+                    logits_pool = dict(zip(cor_idx_list,logits_list))
+#                     print('logits_pool',logits_pool.keys())
+                    logits_pool = merge(logits_pool_pre, logits_pool) 
+#                     print('merged_logits_pool',logits_pool.keys())
+                    np.save('global_model/att_global_test_'+'logit_dict.npy', logits_pool) 
+                false_logit_list=[]
+                fale_pred_list=[]
+                false_label_list=[]
+                length_false_idx=len(false_idx)
+#                 print('false_idx_be',len(false_idx))
+                for k in false_idx: ### 预测错的数据
+                    tem=bsz*ind+k
+                    if tem in logits_pool.keys(): ### 存在于logit pool中
+#                         print('k',k)
+                        false_logit_list.append(np.array(logits_pool[tem].cpu().detach())) ### 需要check ind对不对
+                        fale_pred_list.append(np.array(y_preds[k].cpu().detach()))
+                        false_label_list.append(target_all[k].item())
+                        false_idx.remove(k) ### 不存在于logit pool且预测错的
+#                 print('false_idx_af',len(false_idx))
+#                 print('false_logit_list',len(false_logit_list))
+                if len(false_logit_list)!=0 and len(false_logit_list)!=length_false_idx: # 部分存在于logit pool
+                    false_logit=torch.tensor(false_logit_list) ### logit pool中的logit
+                    false_pred=torch.tensor(fale_pred_list)
+                    false_label=torch.tensor(false_label_list)
+#                     print('false_label',false_label)
+#                     print('false_pred',false_pred)
+                    loss_false_ce = criterion_1(false_pred, false_label) ####这里是空的
+                    false_pred_ = F.log_softmax(false_pred, dim=-1)
+                    false_logit_= F.softmax(false_logit, dim=-1)
+                    loss_klx = F.kl_div(false_pred_, false_logit_, reduction='mean')
+                    loss_true2=0.5*loss_false_ce+0.5*loss_klx
+                    labeled_all_false = labeled_all[false_idx].clone() #### this
+                    label_false = target_all[false_idx].clone()
+                    model_temp=copy.deepcopy(model)
+                    weighted_logits= client_prediction(labeled_all_false,label_false,model_temp)
+                    pred_false=y_preds[false_idx].to(device)
+                    pred_false_ = F.log_softmax(pred_false, dim=-1)
+                    loss_false = F.kl_div(pred_false_, weighted_logits.to(device), reduction='mean')
+                    # print('loss_true1',loss_true1)
+                    # print('loss_true2',loss_true2)
+                    # print('loss_false',loss_false)
+                    loss = loss_true1+loss_true2+loss_false
+                if len(false_logit_list)==0: #全部都不在logit pool：
+                    labeled_all_false = labeled_all[false_idx].clone() #### this
+                    label_false = target_all[false_idx].clone()
+                    model_temp=copy.deepcopy(model)
+                    weighted_logits= client_prediction(labeled_all_false,label_false,model_temp)
+                    pred_false=y_preds[false_idx].clone().to(device)
+#                     print('pred_false',pred_false.shape)
+                    pred_false_ = F.log_softmax(pred_false, dim=-1)
+                    loss_false = F.kl_div(pred_false_, weighted_logits.to(device), reduction='mean')
+                    # print('loss_true1',loss_true1)
+#                     print('loss_true2',loss_true2)
+                    # print('loss_false',loss_false)
+#                     loss = loss_true1+loss_false
+                    loss = loss_true1+loss_false
+                if len(false_logit_list)==length_false_idx: #全部都在logit pool：
+                    false_logit=torch.tensor(false_logit_list) ### logit pool中的logit
+                    false_pred=torch.tensor(fale_pred_list)
+                    false_label=torch.tensor(false_label_list)
+                    loss_false_ce = criterion_1(false_pred, false_label) ####这里是空的
+                    false_pred_ = F.log_softmax(false_pred, dim=-1)
+                    false_logit_= F.softmax(false_logit, dim=-1)
+                    loss_kl = F.kl_div(false_pred_, false_logit_, reduction='mean')
+                    loss_true2=0.5*loss_false_ce+0.5*loss_kl
+                    # print('loss_true1',loss_true1)
+                    # print('loss_true2',loss_true2)
+#                     print('loss_false',loss_false)
+                    loss = loss_true1+loss_true2
 
-        image_size = 28
-        class_num=10
-    if data_name == 'cifar-10':
-        # from models_contrastive import resnet18
-        # model_global = models.__dict__['wrn28x2'](num_classes=50)
-        # model_t.load_state_dict(torch.load(args.trained_dir))
-        model = resnet18_(pretrained=True)
-        image_size = 224
-        class_num=10
-        # print('model_done')
-    if data_name == 'imagenet':
-        # model_global = models.__dict__['resnet110'](num_classes=50)
-        # model_t.load_state_dict(torch.load(args.trained_dir))
-        model = resnet50_(pretrained=True)
-        # from models_contrastive import resnet50
-        image_size = 224
-        class_num=1000
+            if len(true_idx)==bsz: ##全部预测正确
+#                 print('len(true_idx)==bsz')
+                for i in true_idx:
+                    false_idx.remove(i)
+                    cor_idx_list.append(bsz*ind+i) ### 需要check ind对不对
+                    logits_list.append(y_preds[i])
+                true_pred=y_preds[true_idx].clone()
+                true_label =target_all[true_idx].clone()
+                loss_true1 =criterion_1(true_pred, true_label) ### 预测对的数据
+                if comm_round==1:
+                    logits_pool = dict(zip(cor_idx_list,logits_list))
+#                     print('logits_pool',logits_pool.keys())
+                    np.save('global_model/att_global_test_'+'logit_dict.npy', logits_pool) 
+                else:
+                    logits_pool_pre = np.load('global_model/att_global_test_'+'logit_dict.npy',allow_pickle=True).item()
+                    logits_pool = dict(zip(cor_idx_list,logits_list))
+#                     print('logits_pool',logits_pool.keys())
+                    logits_pool = merge(logits_pool_pre, logits_pool) 
+#                     print('_merged_logits_pool',logits_pool.keys())
+                    np.save('global_model/att_global_test_'+'logit_dict.npy', logits_pool)
+                loss = loss_true1
+            if len(true_idx)==0: ###全部预测错误
+                # print('len(true_idx)==0')
+                if comm_round!=1:
+                    logits_pool = np.load('global_model/att_global_test_'+'logit_dict.npy',allow_pickle=True).item()
+                    false_logit_list=[]
+                    fale_pred_list=[]
+                    false_label_list=[]
+                    for k in false_idx: ### 预测错的数据
+                        tem=bsz*ind+k
+                        if tem in logits_pool.keys(): ### 存在于logit pool中
+                            false_logit_list.append(np.array(logits_pool[tem].cpu().detach())) ### 需要check ind对不对
+                            fale_pred_list.append(np.array(y_preds[k].cpu().detach()))
+                            false_label_list.append(target_all[k].item())
+                            false_idx.remove(k) ### 不存在于logit pool且预测错的
+                    false_logit=torch.tensor(false_logit_list) ### logit pool中的logit
+                    false_pred=torch.tensor(fale_pred_list)
+                    false_label=torch.tensor(false_label_list)
+                    loss_false_ce = criterion_1(false_pred, false_label)
+                    false_pred_ = F.log_softmax(false_pred, dim=-1)
+                    false_logit_= F.softmax(false_logit, dim=-1)
+                    loss_kl = F.kl_div(false_pred_, false_logit_, reduction='mean')
+                    loss_true2=0.5*loss_false_ce+0.5*loss_kl
+                    if len(false_idx)!=0:
+                        labeled_all_false = labeled_all[false_idx].clone() #### this
+                        label_false = target_all[false_idx].clone()
+                        model_temp=copy.deepcopy(model)
+                        weighted_logits= client_prediction(labeled_all_false,label_false,model_temp)
+                        pred_false=y_preds[false_idx].clone()
+                        pred_false_ = F.log_softmax(pred_false, dim=-1)
+                        loss_false = F.kl_div(pred_false_, weighted_logits, reduction='mean')
+                    loss = loss_true2+loss_false
+                if comm_round ==1:
+                    continue
+            optim.zero_grad()
+            loss.backward()
+            optim.step()
+            del loss
+            torch.cuda.empty_cache()
+    return model
 
-    HC_img, HC_label = load_xray(data_dir_HC)
-    PT_img, PT_label = load_xray(data_dir_covid)
-    HC_img_test, HC_label_test = load_xray_test(data_dir_HC_test,image_size)
-    PT_img_test, PT_label_test = load_xray_test(data_dir_covid_test,image_size)
-    # print('HC_img_test',np.array(HC_img_test).shape)
-    # print('PT_img_test',np.array(PT_img_test).shape)
-    total_img = np.concatenate([HC_img,PT_img])
-    total_label = np.concatenate([HC_label,PT_label])
-    total_img_test = np.concatenate([HC_img_test,PT_img_test])
-    total_label_test = np.concatenate([HC_label_test,PT_label_test])
-    # print('total_img_test',total_img_test)
-    random_index = [i for i in range(len(total_label))]
-    random_index_test = [i for i in range(len(total_label_test))]
-    random.shuffle(random_index)
-    random.shuffle(random_index_test)
-    total_img=total_img[random_index]
-    total_label=total_label[random_index]
-    total_img_test=total_img_test[random_index_test]
-    total_label_test=total_label_test[random_index_test]
-    # print('total_img_test',total_img_test.shape)
-    # print('total_label_test',total_label_test.shape)
-    test_dataset = TensorDataset(total_img_test, total_label_test)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size,
-                               shuffle=True, num_workers=14, pin_memory=True)
-    # for ind, (x,y) in enumerate(test_loader):
-    #     print('x',x.shape)
-    #     print('y',y)
-    data_indices = noniid_slicing(total_img, total_label, num_clients, num_shards=200)
-    save_dict(data_indices, "att_data_noniid.pkl")
+def train_kl_att(data,label,model,feat_s, pred_false, criterion_ce,criterion_kd,criterion_kl,device):
+    import torch.nn as nn
+    import torch.nn.functional as F
+    loss=0
+    num=num_clients
+    for i in range(num_clients): ### 全部data
+        model.load_state_dict(torch.load('local_model/'+'att_local_test_'+str(i)+'.pt'))
+        model.to(device)
+        # print('feat_s',feat_s[0].shape)
+        with torch.no_grad():
+            feat_t, y_pred,_,__ = model(data, is_feat=True)
+            feat_t = [f.detach() for f in feat_t]
+        # print('feat_t_done')
+        # print('feat_t',feat_t[0].shape)
+        y_pred = nn.Softmax()(y_pred)
+        y_preds = y_pred.max(1)[1]
+        incor_idx = torch.where(y_preds != label)[0].tolist()
+        cor_idx = torch.where(y_preds != label)[0].tolist()
+        loss_ce = criterion_ce(pred_false, label)
+        # print('generate_loss_ce_done')
+        # print('cor_idx',cor_idx)
+        if len(cor_idx)==0 or len(cor_idx)==1:
+            loss=loss_ce
+            num-=1
+        else:
+            ent_1 = torch.sum(-y_pred * torch.log(y_pred + 1e-5), dim=1) / np.log(2)
+            ent_1 = ent_1.float().cpu()
+            ent_1[incor_idx]=0
+            ent_1.to(device)
+            feat_ss=[]
+            for i in feat_s:
+                feat_ss.append(i[cor_idx].to(device))
+            feat_tt=[]
+            for i in feat_t:
+                feat_tt.append(i[cor_idx].to(device))
+            output_t = y_pred[cor_idx]
+            output_s = pred_false[cor_idx]
+            # feat_s=feat_s[cor_idx]
+            # feat_t=feat_t[cor_idx]
+            loss_kd = criterion_kd(feat_ss, feat_tt,ent_1)
+            # print('loss_kd_done')
+            loss_kl = criterion_kl(output_s, output_t)
+            # print('loss_kl_done')
+            loss += loss_kd+5*loss_kl+5*loss_ce
+            # print('generate_kt_loss_done')
+        # print('kd_att_loss',loss)
+    if num==0:
+        return loss
+    else:
+        return loss/num
 
-    source_loader_list, labeled_loader_list, unlabeled_loader_list=[], [], []
-    model_list, optim_list, schedule_list=[],[],[]
-    coefficient_matrix_=[]
-    HC_similarity_list, PT_similarity_list = [],[]
-    # if data_name == 'imagenet':
-    #     model = resnet50(pretrained=True)
-    #         # model = model_.to(device)
-    # if data_name == 'cifar-10':
-    #     model = resnet18(pretrained=True)
-    #     # model = model_.to(device)
-    # if data_name == 'mnist':
-    #     model = Net()
-    # optim = torch.optim.Adam(model.parameters())
-    # lr_schedule = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, patience=1, verbose=True)
-    # model_list = [model]*num_clients
-    # optim_list=[optim]*num_clients
-    # schedule_list=[lr_schedule]*num_clients
-    ### initialization for dataset, model, optim, scheduler ###
-    test_loader_list=[]
-    for i in data_indices.keys(): 
-        num_index = data_indices[i].tolist()
-        coefficient_matrix_.append(len(num_index))
-        # print(num_index)
-        data_temp = total_img[num_index]
-        label_temp = total_label[num_index]
-        # print('label', label_temp)
-        HC_labeled_data,PT_labeled_data,labeled_dataset,unlabeled_dataset = obtain_xray(image_size, data_temp, label_temp)
-        labeled_loader = DataLoader(labeled_dataset, batch_size=batch_size,
-                               shuffle=True, num_workers=14, pin_memory=True)
-        unlabeled_loader = DataLoader(unlabeled_dataset, batch_size=batch_size,
-                               shuffle=True, num_workers=14, pin_memory=True)
-        # labeled_loader,unlabeled_loader,HC_similarity_index,PT_similarity_index = get_dataloader(data_name,image_size,class_num,HC_labeled_data,PT_labeled_data,labeled_dataset,unlabeled_dataset)
-        # HC_similarity_list.append(HC_similarity_index)
-        # PT_similarity_list.append(PT_similarity_index)
-        # source_loader_list.append(source_loader)
-        labeled_loader_list.append(labeled_loader)
-        unlabeled_loader_list.append(unlabeled_loader)
-        test_loader_list.append(test_loader)
-        optim = torch.optim.Adam(model.parameters())
-        lr_schedule = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, patience=1, verbose=True)
-        model_list.append(model)
-        optim_list.append(optim)
-        schedule_list.append(lr_schedule)
-    # HC_similarity_clean,PT_similarity_clean = clean_data(HC_similarity_list,PT_similarity_list)
-    # HC_similarity_clean=[7]
-    # PT_similarity_clean=[4]
-    HC_similarity_clean=[1]
-    PT_similarity_clean=[0]
-    print('HC_similarity_clean',HC_similarity_clean)
-    print('PT_similarity_clean',PT_similarity_clean)
-    intersected_natural_dataset = generate_training_samples_global(data_name,image_size,PT_similarity_clean,HC_similarity_clean)
-    intersected_natural_loader = DataLoader(intersected_natural_dataset, batch_size=batch_size,
-                               shuffle=True, num_workers=14, pin_memory=True)
-    coefficient_matrix = coefficient_matrix_/np.array(coefficient_matrix_).sum()
-    idx = [i for i in range(num_clients)]
-    intersected_natural_loader_list =[intersected_natural_loader]*num_clients
-    epochs_list=[epochs]*num_clients
-    iterations_list=[iterations]*num_clients
-    for commun in range(cm_rounds):
-        comm_list=[commun]*num_clients
-        para_list=[]
-        for i in range(num_clients):
-            para_list.append([model_list[i],optim_list[i],schedule_list[i], idx[i], intersected_natural_loader_list[i],labeled_loader_list[i],unlabeled_loader_list[i],test_loader_list[i], epochs_list[i],iterations_list[i],comm_list[i]])
-        # print('commun',commun)
-        p=Pool(num_clients)
-        p.map(start_client,para_list)
-        p.close()
-        p.join()
-        model_list = avg_parameter(model_list, coefficient_matrix) # fedavg algorithm
-        
-        torch.save(model_list[0].state_dict(),'global_model/'+str(data_name)+'_att_global_test_'+str(commun)+'.pt')
-        
-if __name__ == '__main__':
-    main()
+class DistillKL_(nn.Module):
+    """Distilling the Knowledge in a Neural Network"""
+    def __init__(self, T):
+        super(DistillKL_, self).__init__()
+        self.T = T
+
+    def forward(self, y_s, y_t):
+        import torch.nn as nn
+        import torch.nn.functional as F
+        p_s = F.log_softmax(y_s/self.T, dim=1)
+        p_t = F.softmax(y_t/self.T, dim=1)
+        loss = F.kl_div(p_s, p_t, reduction='sum') * (self.T**2) / y_s.shape[0]
+        return loss
+
+def gems_att_training(comm_round,model,local_model,optim,device,lr_schedule,global_loader, global_epoch,criterion_1,criterion_2,criterion_kd,criterion_kl, test_loader):
+    import torch.nn as nn
+    import torch.nn.functional as F
+    AUC_value = 0
+    model.to(device)
+    for epoch in range(1, global_epoch+1):
+        # print('epoch',epoch)
+        cor_idx_list=[]
+        logits_list=[]
+        #     batch_iterator = zip(loop_iterable(source_loader), loop_iterable(target_loader))
+        # batch_iterator = zip(loop_iterable(labeled_loader) ,loop_iterable(unlabeled_loader))
+        for ind, (data,label) in enumerate(global_loader):
+            labeled_all,target_all =  data.to(device), label.to(device)
+            bsz = labeled_all.shape[0]
+            # print('labeled_all',labeled_all.shape)
+            # print('target_all',target_all)
+            labeled_all = labeled_all.to(torch.float32)
+            # aug_data = aug_data.to(torch.float32)
+            # images = torch.cat([labeled_all, aug_data], dim=0)
+            
+            target_all = target_all.to(torch.long)
+            # centroid_label = torch.tensor([0,1])
+            feat_s, y_preds,_,__ = model(labeled_all)
+            # y_preds=y_preds[:bsz]
+            y_pred = y_preds.max(1)[1]
+            true_idx = torch.where(torch.eq(y_pred,target_all)==True)[0].tolist()
+            # f1, f2 = torch.split(features_norm, [bsz, bsz], dim=0)
+            # features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
+            # del _,f1, f2,features_norm
+            # torch.cuda.empty_cache()
+            # clustering_loss = criterion_2(features, target_all)
+#             print('true_idx',len(true_idx))
+            false_idx = [i for i in range(bsz)]
+            # centroid,_ = obtain_cnn_centroid_feature(model,labeled_all)
+            # centroid = torch.tensor(centroid).to(device)
+            # weighted_centroid_tensor = weighted_centroid_tensor.to(device)
+            # print('centroid',centroid.shape)
+            # print('weighted_centroid_tensor',weighted_centroid_tensor.shape)
+            # centroid_features_1 = torch.cat([centroid.unsqueeze(1),weighted_centroid_tensor.unsqueeze(1)], dim=1)
+            # centroid_contrastive_1= criterion_2(centroid_features_1,centroid_label)
+            # centroid_contrastive = centroid_contrastive_1
+            # print('centroid_features_1',centroid_features_1.shape)
+            # print('weighted_centroid_tensor',weighted_centroid_tensor.shape)
+
+
+#             print('len',len(true_idx))
+            if len(true_idx)!=0 and len(true_idx)!=bsz:
+#                 print('len(true_idx)!=0 and len(true_idx)!=bsz')
+                for i in true_idx:
+                    false_idx.remove(i)
+                    cor_idx_list.append(bsz*ind+i) ### 需要check ind对不对
+                    logits_list.append(y_preds[i])
+#                 print('cor_idx_list',cor_idx_list)
+                true_pred=y_preds[true_idx].clone()
+                true_label =target_all[true_idx].clone()
+#                 print('true_pred',true_pred.shape)
+                loss_true1 =criterion_1(true_pred, true_label) ### 预测对的数据
+                if comm_round==1:
+                    logits_pool = dict(zip(cor_idx_list,logits_list))
+                    # print('generate_dict_done')
+#                     print('logits_pool',logits_pool.keys())
+                    np.save('global_model/att_global_test_'+'logit_dict.npy', logits_pool) 
+                else:
+                    logits_pool_pre = np.load('global_model/att_global_test_'+'logit_dict.npy',allow_pickle=True).item()
+                    logits_pool = dict(zip(cor_idx_list,logits_list))
+#                     print('logits_pool',logits_pool.keys())
+                    logits_pool = merge(logits_pool_pre, logits_pool) 
+#                     print('merged_logits_pool',logits_pool.keys())
+                    np.save('global_model/att_global_test_'+'logit_dict.npy', logits_pool) 
+                false_logit_list=[]
+                fale_pred_list=[]
+                false_label_list=[]
+                length_false_idx=len(false_idx)
+#                 print('false_idx_be',len(false_idx))
+                for k in false_idx: ### 预测错的数据
+                    tem=bsz*ind+k
+                    if tem in logits_pool.keys(): ### 存在于logit pool中
+#                         print('k',k)
+                        false_logit_list.append(np.array(logits_pool[tem].cpu().detach())) 
+                        fale_pred_list.append(np.array(y_preds[k].cpu().detach()))
+                        false_label_list.append(target_all[k].item())
+                        # false_label_list.append(np.array(target_all[k].item()))
+                        false_idx.remove(k) ### 不存在于logit pool且预测错的
+#                 print('false_idx_af',len(false_idx))
+#                 print('false_logit_list',len(false_logit_list))
+                if len(false_logit_list)!=0 and len(false_logit_list)!=length_false_idx: # 部分存在于logit pool
+                    false_logit=torch.tensor(false_logit_list).to(device) ### logit pool中的logit
+                    false_pred=torch.tensor(fale_pred_list).to(device)
+                    # print('false_label_list',false_label_list)
+                    false_label=torch.tensor(false_label_list).to(device)
+#                     print('false_label',false_label)
+#                     print('false_pred',false_pred)
+                    loss_false_ce = criterion_1(false_pred, false_label) ####这里是空的
+                    false_pred_ = F.log_softmax(false_pred, dim=-1)
+                    false_logit_= F.softmax(false_logit, dim=-1)
+                    loss_klx = F.kl_div(false_pred_, false_logit_, reduction='mean')
+                    loss_true2=0.5*loss_false_ce+0.5*loss_klx
+                    # print('loss_true2_done')
+
+
+                    labeled_all_false = labeled_all[false_idx].clone() #### this
+                    label_false = target_all[false_idx].clone()
+                    
+                    pred_false=y_preds[false_idx].to(device) #### 错误预测的值
+                    model_temp=copy.deepcopy(local_model)
+
+                    feat_ss=[]
+                    for i in feat_s:
+                        feat_ss.append(i[false_idx].to(device))
+                    # print('generate_feta_ss_done')
+                    loss_false = train_kl_att(labeled_all_false,label_false,model_temp,feat_ss,pred_false, criterion_1,criterion_kd,criterion_kl,device)
+                    # print('generate_loss_false_done')
+                    # feat_s = feat_s[false_idx]
+                    # loss_false = train_kl_att(labeled_all_false,label_false,model_temp,feat_s,criterion_kd)
+
+
+                    # weighted_logits= client_prediction(labeled_all_false,label_false,model_temp)
+                    # pred_false=y_preds[false_idx].to(device)
+                    # pred_false_ = F.log_softmax(pred_false, dim=-1)
+                    # loss_false = F.kl_div(pred_false_, weighted_logits.to(device), reduction='mean')
+                    del model_temp,label_false,labeled_all_false,false_logit_,false_pred_,false_pred,false_label
+                    torch.cuda.empty_cache()
+                    # print('loss_true1',loss_true1)
+                    # print('loss_true2',loss_true2)
+                    # print('loss_false',loss_false)
+                    loss = 0.5*loss_true1+0.3*loss_true2+0.2*loss_false
+                    # loss = clustering_weights*clustering_loss+contrastive_weights*centroid_contrastive+0.5*loss_true1+0.3*loss_true2+0.2*loss_false
+                if len(false_logit_list)==0: #全部都不在logit pool：
+                    labeled_all_false = labeled_all[false_idx].clone() #### this
+                    label_false = target_all[false_idx].clone()
+                    model_temp=copy.deepcopy(local_model)
+                    # feat_s = feat_s[false_idx]
+                    feat_ss=[]
+                    for i in feat_s:
+                        feat_ss.append(i[false_idx])
+                    pred_false=y_preds[false_idx].clone().to(device)
+                    loss_false = train_kl_att(labeled_all_false,label_false,model_temp,feat_ss,pred_false, criterion_1, criterion_kd,criterion_kl,device)
+                    # loss_false = train_kl_att(labeled_all_false,label_false,model_temp,feat_ss,criterion_kd,device)
+#                     weighted_logits= client_prediction(labeled_all_false,label_false,model_temp)
+                    # pred_false=y_preds[false_idx].clone().to(device)
+# #                     print('pred_false',pred_false.shape)
+#                     pred_false_ = F.log_softmax(pred_false, dim=-1)
+#                     loss_false = F.kl_div(pred_false_, weighted_logits.to(device), reduction='mean')
+                    del label_false,model_temp,labeled_all_false
+                    torch.cuda.empty_cache()
+                    # print('loss_true1',loss_true1)
+#                     print('loss_true2',loss_true2)
+                    # print('loss_false',loss_false)
+#                     loss = loss_true1+loss_false
+                    # loss = clustering_weights*clustering_loss+contrastive_weights*centroid_contrastive+0.7*loss_true1+0.3*loss_false
+                    loss = 0.7*loss_true1+0.3*loss_false
+                if len(false_logit_list)==length_false_idx: #全部都在logit pool：
+                    false_logit=torch.tensor(false_logit_list).to(device) ### logit pool中的logit
+                    # print('fale_pred_list',fale_pred_list)
+                    false_pred=torch.tensor(fale_pred_list).to(device)
+                    false_label=torch.tensor(false_label_list).to(device)
+                    loss_false_ce = criterion_1(false_pred, false_label) ####这里是空的
+                    false_pred_ = F.log_softmax(false_pred, dim=-1)
+                    false_logit_= F.softmax(false_logit, dim=-1)
+                    loss_kl = F.kl_div(false_pred_, false_logit_, reduction='mean')
+                    loss_true2=0.5*loss_false_ce+0.5*loss_kl
+                    del false_pred_,false_logit_,false_label
+                    torch.cuda.empty_cache()
+                    # print('loss_true1',loss_true1)
+                    # print('loss_true2',loss_true2)
+#                     print('loss_false',loss_false)
+                    loss = 0.6*loss_true1+0.4*loss_true2
+                    # loss = clustering_weights*clustering_loss+contrastive_weights*centroid_contrastive+0.6*loss_true1+0.4*loss_true2
+
+            if len(true_idx)==bsz: ##全部预测正确
+#                 print('len(true_idx)==bsz')
+                for i in true_idx:
+                    false_idx.remove(i)
+                    cor_idx_list.append(bsz*ind+i) ### 需要check ind对不对
+                    logits_list.append(y_preds[i])
+                true_pred=y_preds[true_idx].clone()
+                true_label =target_all[true_idx].clone()
+                loss_true1 =criterion_1(true_pred, true_label) ### 预测对的数据
+                if comm_round==1:
+                    logits_pool = dict(zip(cor_idx_list,logits_list))
+#                     print('logits_pool',logits_pool.keys())
+                    np.save('global_model/att_global_test_'+'logit_dict.npy', logits_pool)
+                else:
+                    logits_pool_pre = np.load('global_model/att_global_test_'+'logit_dict.npy',allow_pickle=True).item()
+                    logits_pool = dict(zip(cor_idx_list,logits_list))
+#                     print('logits_pool',logits_pool.keys())
+                    logits_pool = merge(logits_pool_pre, logits_pool) 
+#                     print('_merged_logits_pool',logits_pool.keys())
+                    np.save('global_model/att_global_test_'+'logit_dict.npy', logits_pool)
+                loss = loss_true1
+                # loss = clustering_weights*clustering_loss+contrastive_weights*centroid_contrastive+loss_true1
+            if len(true_idx)==0: ###全部预测错误
+                # print('len(true_idx)==0')
+                if comm_round!=1:
+                    logits_pool = np.load('global_model/att_global_test_'+'logit_dict.npy',allow_pickle=True).item()
+                    false_logit_list=[]
+                    fale_pred_list=[]
+                    false_label_list=[]
+                    for k in false_idx: ### 预测错的数据
+                        tem=bsz*ind+k
+                        if tem in logits_pool.keys(): ### 存在于logit pool中
+                            false_logit_list.append(np.array(logits_pool[tem].cpu().detach())) ### 需要check ind对不对
+                            fale_pred_list.append(np.array(y_preds[k].cpu().detach()))
+                            false_label_list.append(target_all[k].item())
+                            false_idx.remove(k) ### 不存在于logit pool且预测错的
+                    false_logit=torch.tensor(false_logit_list).to(device) ### logit pool中的logit
+                    false_pred=torch.tensor(fale_pred_list).to(device)
+                    false_label=torch.tensor(false_label_list).to(device)
+                    loss_false_ce = criterion_1(false_pred, false_label)
+                    false_pred_ = F.log_softmax(false_pred, dim=-1)
+                    false_logit_= F.softmax(false_logit, dim=-1)
+                    loss_kl = F.kl_div(false_pred_, false_logit_, reduction='mean')
+                    loss_true2=0.5*loss_false_ce+0.5*loss_kl
+                    if len(false_idx)!=0:
+                        labeled_all_false = labeled_all[false_idx].clone() #### this
+                        label_false = target_all[false_idx].clone()
+                        model_temp=copy.deepcopy(model)
+                        weighted_logits= client_prediction(labeled_all_false,label_false,model_temp)
+                        pred_false=y_preds[false_idx].clone()
+                        pred_false_ = F.log_softmax(pred_false, dim=-1)
+                        loss_false = F.kl_div(pred_false_, weighted_logits, reduction='mean')
+                    loss = 0.6*loss_true2+0.4*loss_false
+                    # loss = clustering_weights*clustering_loss+contrastive_weights*centroid_contrastive+0.6*loss_true2+0.4*loss_false
+                if comm_round ==1:
+                    print('all_incorrect')
+                    continue
+            # print('att_loss',loss)
+            optim.zero_grad()
+            loss.backward()
+            optim.step()
+            del loss
+            torch.cuda.empty_cache()
+        test_AUC = train_test(model, device, test_loader)
+        if test_AUC>= AUC_value:
+            AUC_value = test_AUC
+            model_ = copy.deepcopy(model)
+    return model_

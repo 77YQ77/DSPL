@@ -43,14 +43,11 @@ criterion_2 = SupConLoss()
 # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ### target data type ###
 data_type = 'phenomia'
-if data_type=='covid':
-    data_dir_HC = '/home/zhianhuang/huyao/Public2Medical/output_no_finding/'
-    data_dir_covid = '/home/zhianhuang/huyao/Public2Medical/output/'
 if data_type=='phenomia': 
-    data_dir_HC = '/home/zhianhuang/huyao/Public2Medical/Pneumonia_chest_xray/train/NORMAL/'
-    data_dir_covid = '/home/zhianhuang/huyao/Public2Medical/Pneumonia_chest_xray/train/PNEUMONIA/'
-    data_dir_HC_test = '/home/zhianhuang/huyao/Public2Medical/Pneumonia_chest_xray/test/NORMAL/'
-    data_dir_covid_test = '/home/zhianhuang/huyao/Public2Medical/Pneumonia_chest_xray/test/PNEUMONIA/'
+    data_dir_HC = 'data/Pneumonia_chest_xray/train/NORMAL/'
+    data_dir_covid = 'data/Pneumonia_chest_xray/train/PNEUMONIA/'
+    data_dir_HC_test = 'data/Pneumonia_chest_xray/test/NORMAL/'
+    data_dir_covid_test = 'data/Pneumonia_chest_xray/test/PNEUMONIA/'
 
 class TensorDataset(Dataset):
     def __init__(self, data_tensor, target_tensor):

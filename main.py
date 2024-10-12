@@ -1,5 +1,5 @@
-from lcoal_training_gems_gpu_att_test import lcoal_training
-from lcoal_training_gems_gpu_att_test import data_name, num_clients
+from local_training_gems_att import lcoal_training
+from local_training_gems_att import data_name, num_clients
 import torch
 from torch import multiprocessing as mp
 torch.multiprocessing.set_start_method('spawn')
